@@ -1,0 +1,89 @@
+ASSETS_DIR := internal/plugin/embed/assets
+ORT_VERSION := 1.24.1
+MODEL_REPO  := Xenova/all-MiniLM-L6-v2
+HF_BASE     := https://huggingface.co/$(MODEL_REPO)/resolve/main
+ORT_BASE    := https://github.com/microsoft/onnxruntime/releases/download/v$(ORT_VERSION)
+
+.PHONY: fetch-assets fetch-model fetch-ort-libs clean-assets build test test-integration
+
+## fetch-assets: download the model, tokenizer, and all platform ORT libraries.
+fetch-assets: fetch-model fetch-ort-libs
+
+## fetch-model: download model_int8.onnx and tokenizer.json from HuggingFace.
+fetch-model:
+	@echo "==> Downloading all-MiniLM-L6-v2 INT8 model..."
+	@mkdir -p $(ASSETS_DIR)
+	@curl -fL --progress-bar \
+		"$(HF_BASE)/onnx/model_int8.onnx" \
+		-o "$(ASSETS_DIR)/model_int8.onnx"
+	@echo "==> Downloading tokenizer.json..."
+	@curl -fL --progress-bar \
+		"https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json" \
+		-o "$(ASSETS_DIR)/tokenizer.json"
+	@echo "    model_int8.onnx: $$(du -sh $(ASSETS_DIR)/model_int8.onnx | cut -f1)"
+	@echo "    tokenizer.json:  $$(du -sh $(ASSETS_DIR)/tokenizer.json  | cut -f1)"
+	@echo "==> Model assets ready."
+
+## fetch-ort-libs: download ORT native libraries for all supported platforms.
+fetch-ort-libs:
+	@echo "==> Downloading ORT $(ORT_VERSION) native libraries..."
+	@mkdir -p $(ASSETS_DIR)
+	@$(MAKE) -s _ort-darwin-arm64
+	@$(MAKE) -s _ort-darwin-amd64
+	@$(MAKE) -s _ort-linux-amd64
+	@echo "==> ORT native libraries ready."
+
+_ort-darwin-arm64:
+	@echo "    Fetching darwin/arm64..."
+	@curl -fL --progress-bar \
+		"$(ORT_BASE)/onnxruntime-osx-arm64-$(ORT_VERSION).tgz" \
+		-o "/tmp/ort-osx-arm64.tgz"
+	@tar -xzf /tmp/ort-osx-arm64.tgz -C /tmp onnxruntime-osx-arm64-$(ORT_VERSION)/lib/libonnxruntime.dylib 2>/dev/null || \
+		tar -xzf /tmp/ort-osx-arm64.tgz -C /tmp --strip-components=2 --wildcards '*/lib/libonnxruntime.dylib'
+	@cp /tmp/onnxruntime-osx-arm64-$(ORT_VERSION)/lib/libonnxruntime.dylib $(ASSETS_DIR)/libonnxruntime_darwin_arm64.dylib 2>/dev/null || \
+		cp /tmp/libonnxruntime.dylib $(ASSETS_DIR)/libonnxruntime_darwin_arm64.dylib
+	@echo "    darwin/arm64: $$(du -sh $(ASSETS_DIR)/libonnxruntime_darwin_arm64.dylib | cut -f1)"
+
+_ort-darwin-amd64:
+	@echo "    Fetching darwin/amd64..."
+	@curl -fL --progress-bar \
+		"$(ORT_BASE)/onnxruntime-osx-x86_64-$(ORT_VERSION).tgz" \
+		-o "/tmp/ort-osx-amd64.tgz"
+	@tar -xzf /tmp/ort-osx-amd64.tgz -C /tmp onnxruntime-osx-x86_64-$(ORT_VERSION)/lib/libonnxruntime.dylib 2>/dev/null || \
+		tar -xzf /tmp/ort-osx-amd64.tgz -C /tmp --strip-components=2 --wildcards '*/lib/libonnxruntime.dylib'
+	@cp /tmp/onnxruntime-osx-x86_64-$(ORT_VERSION)/lib/libonnxruntime.dylib $(ASSETS_DIR)/libonnxruntime_darwin_amd64.dylib 2>/dev/null || \
+		cp /tmp/libonnxruntime.dylib $(ASSETS_DIR)/libonnxruntime_darwin_amd64.dylib
+	@echo "    darwin/amd64: $$(du -sh $(ASSETS_DIR)/libonnxruntime_darwin_amd64.dylib | cut -f1)"
+
+_ort-linux-amd64:
+	@echo "    Fetching linux/amd64..."
+	@curl -fL --progress-bar \
+		"$(ORT_BASE)/onnxruntime-linux-x64-$(ORT_VERSION).tgz" \
+		-o "/tmp/ort-linux-amd64.tgz"
+	@tar -xzf /tmp/ort-linux-amd64.tgz -C /tmp onnxruntime-linux-x64-$(ORT_VERSION)/lib/libonnxruntime.so.$(ORT_VERSION) 2>/dev/null || \
+		tar -xzf /tmp/ort-linux-amd64.tgz -C /tmp --strip-components=2 --wildcards '*/lib/libonnxruntime.so.*'
+	@cp /tmp/onnxruntime-linux-x64-$(ORT_VERSION)/lib/libonnxruntime.so.$(ORT_VERSION) $(ASSETS_DIR)/libonnxruntime_linux_amd64.so 2>/dev/null || \
+		find /tmp -name 'libonnxruntime.so.*' | head -1 | xargs -I{} cp {} $(ASSETS_DIR)/libonnxruntime_linux_amd64.so
+	@echo "    linux/amd64: $$(du -sh $(ASSETS_DIR)/libonnxruntime_linux_amd64.so | cut -f1)"
+
+## clean-assets: remove downloaded binary assets.
+clean-assets:
+	@echo "==> Removing downloaded assets..."
+	@rm -f $(ASSETS_DIR)/model_int8.onnx
+	@rm -f $(ASSETS_DIR)/tokenizer.json
+	@rm -f $(ASSETS_DIR)/libonnxruntime_*.dylib
+	@rm -f $(ASSETS_DIR)/libonnxruntime_*.so
+	@echo "==> Done."
+
+## build: build the server binary (requires fetch-assets first).
+build:
+	@go build -o muninndb-server ./cmd/muninn/...
+
+## test: run unit tests across all packages.
+test:
+	@go test ./...
+
+## test-integration: run integration tests (requires no muninn already running on :8750).
+## Builds the binary, exercises the full start/stop/restart lifecycle, then cleans up.
+test-integration:
+	@go test -tags integration -v -timeout 120s ./cmd/muninn/...

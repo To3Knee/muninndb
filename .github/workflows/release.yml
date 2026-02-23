@@ -1,0 +1,142 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  # ── Build native binaries for each supported platform ───────────────────
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14         # Apple Silicon (M1/M2)
+            goos: darwin
+            goarch: arm64
+            ort_target: _ort-darwin-arm64
+            cache_key: embed-assets-ort-1.24.1-minilm-v2-darwin-arm64
+
+          - runner: macos-13         # Intel Mac
+            goos: darwin
+            goarch: amd64
+            ort_target: _ort-darwin-amd64
+            cache_key: embed-assets-ort-1.24.1-minilm-v2-darwin-amd64
+
+          - runner: ubuntu-latest    # Linux x86-64
+            goos: linux
+            goarch: amd64
+            ort_target: _ort-linux-amd64
+            cache_key: embed-assets-ort-1.24.1-minilm-v2-linux-amd64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Cache the model + ORT native library (~56MB per platform).
+      # Key includes ORT version, model name, and platform so stale assets
+      # never get reused after a version bump.
+      - name: Cache embed assets
+        id: asset-cache
+        uses: actions/cache@v4
+        with:
+          path: internal/plugin/embed/assets
+          key: ${{ matrix.cache_key }}
+
+      - name: Fetch embed assets
+        if: steps.asset-cache.outputs.cache-hit != 'true'
+        run: make fetch-model ${{ matrix.ort_target }}
+
+      - name: Build binary
+        run: |
+          go build \
+            -ldflags "-X main.version=${GITHUB_REF_NAME}" \
+            -o muninn-${{ matrix.goos }}-${{ matrix.goarch }} \
+            ./cmd/muninn/...
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: muninn-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: muninn-${{ matrix.goos }}-${{ matrix.goarch }}
+
+  # ── Create GitHub Release and attach all binaries ───────────────────────
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${{ github.repository }}" \
+            --title "muninn ${GITHUB_REF_NAME}" \
+            --generate-notes \
+            muninn-darwin-arm64 \
+            muninn-darwin-amd64 \
+            muninn-linux-amd64
+
+  # ── Update Homebrew formula with new version + SHA256s ──────────────────
+  update-formula:
+    name: Update Homebrew Formula
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout homebrew-tap
+        uses: actions/checkout@v4
+        with:
+          repository: scrypster/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Download release binaries and compute SHA256s
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          BASE="https://github.com/scrypster/muninndb/releases/download/${VERSION}"
+          for platform in darwin-arm64 darwin-amd64 linux-amd64; do
+            curl -fsSL "${BASE}/muninn-${platform}" -o "muninn-${platform}"
+            sha256sum "muninn-${platform}" | cut -d' ' -f1 > "sha256-${platform}.txt"
+            echo "${platform}: $(cat sha256-${platform}.txt)"
+          done
+
+      - name: Patch formula
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"   # strip leading 'v'
+          ARM64_SHA=$(cat sha256-darwin-arm64.txt)
+          AMD64_MAC_SHA=$(cat sha256-darwin-amd64.txt)
+          AMD64_LIN_SHA=$(cat sha256-linux-amd64.txt)
+
+          FORMULA="homebrew-tap/Formula/muninn.rb"
+
+          # version line
+          sed -i 's|version "[^"]*"|version "'"${VERSION}"'"|' "${FORMULA}"
+
+          # per-platform sha256 lines (anchored by trailing comment)
+          sed -i 's|sha256 "[^"]*"  # darwin-arm64|sha256 "'"${ARM64_SHA}"'"  # darwin-arm64|' "${FORMULA}"
+          sed -i 's|sha256 "[^"]*"  # darwin-amd64|sha256 "'"${AMD64_MAC_SHA}"'"  # darwin-amd64|' "${FORMULA}"
+          sed -i 's|sha256 "[^"]*"  # linux-amd64|sha256 "'"${AMD64_LIN_SHA}"'"  # linux-amd64|'  "${FORMULA}"
+
+      - name: Commit and push
+        run: |
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/muninn.rb
+          git diff --cached --quiet || git commit -m "chore: update muninn to ${GITHUB_REF_NAME}"
+          git push

@@ -1,0 +1,544 @@
+package rest
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"time"
+
+	"github.com/scrypster/muninndb/internal/auth"
+	plugincfg "github.com/scrypster/muninndb/internal/config"
+	"github.com/scrypster/muninndb/internal/engine"
+	"github.com/scrypster/muninndb/internal/engine/activation"
+	"github.com/scrypster/muninndb/internal/plugin"
+)
+
+// These handlers are mounted at /api/admin/ and require admin session auth.
+
+// isValidVaultName returns true if name is a valid vault name: 1–64 characters,
+// containing only lowercase letters, digits, hyphens, and underscores.
+func isValidVaultName(name string) bool {
+	if len(name) == 0 || len(name) > 64 {
+		return false
+	}
+	for _, r := range name {
+		if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Server) handleCreateAPIKey(authStore *auth.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Vault string `json:"vault"`
+			Label string `json:"label"`
+			Mode  string `json:"mode"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "invalid request body")
+			return
+		}
+		if req.Vault == "" {
+			req.Vault = "default"
+		}
+		if !isValidVaultName(req.Vault) {
+			s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "invalid vault name")
+			return
+		}
+		if len(req.Label) > 256 {
+			s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "label too long")
+			return
+		}
+		if req.Mode != "" && req.Mode != "full" && req.Mode != "observe" {
+			s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "mode must be 'full' or 'observe'")
+			return
+		}
+		token, key, err := authStore.GenerateAPIKey(req.Vault, req.Label, req.Mode)
+		if err != nil {
+			s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, err.Error())
+			return
+		}
+		s.sendJSON(w, http.StatusCreated, map[string]interface{}{
+			"token": token, // shown once
+			"key":   key,
+		})
+	}
+}
+
+func (s *Server) handleListAPIKeys(authStore *auth.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		vault := r.URL.Query().Get("vault")
+		if vault == "" {
+			vault = "default"
+		}
+		if !isValidVaultName(vault) {
+			s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "invalid vault name")
+			return
+		}
+		keys, err := authStore.ListAPIKeys(vault)
+		if err != nil {
+			s.sendError(w, http.StatusInternalServerError, ErrStorageError, err.Error())
+			return
+		}
+		s.sendJSON(w, http.StatusOK, map[string]interface{}{"keys": keys})
+	}
+}
+
+func (s *Server) handleRevokeAPIKey(authStore *auth.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		vault := r.URL.Query().Get("vault")
+		if vault == "" {
+			vault = "default"
+		}
+		if !isValidVaultName(vault) {
+			s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "invalid vault name")
+			return
+		}
+		if err := authStore.RevokeAPIKey(vault, id); err != nil {
+			s.sendError(w, http.StatusNotFound, ErrEngramNotFound, err.Error())
+			return
+		}
+		s.sendJSON(w, http.StatusOK, map[string]interface{}{"revoked": id})
+	}
+}
+
+func (s *Server) handleChangeAdminPassword(authStore *auth.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Username    string `json:"username"`
+			NewPassword string `json:"new_password"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "invalid request body")
+			return
+		}
+		if req.NewPassword == "" {
+			s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "new_password is required")
+			return
+		}
+		if err := authStore.ChangeAdminPassword(req.Username, req.NewPassword); err != nil {
+			s.sendError(w, http.StatusInternalServerError, ErrStorageError, err.Error())
+			return
+		}
+		s.sendJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	}
+}
+
+func (s *Server) handleSetVaultConfig(authStore *auth.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var cfg auth.VaultConfig
+		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+			s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "invalid request body")
+			return
+		}
+		if cfg.Name == "" {
+			cfg.Name = "default"
+		}
+		if !isValidVaultName(cfg.Name) {
+			s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "invalid vault name")
+			return
+		}
+		if err := authStore.SetVaultConfig(cfg); err != nil {
+			s.sendError(w, http.StatusInternalServerError, ErrStorageError, err.Error())
+			return
+		}
+		s.sendJSON(w, http.StatusOK, cfg)
+	}
+}
+
+// handleGetVaultPlasticity returns the raw PlasticityConfig (may be nil) and
+// the fully-resolved config for the named vault.
+func (s *Server) handleGetVaultPlasticity(as *auth.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("name")
+		if name == "" {
+			s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "vault name required")
+			return
+		}
+		if !isValidVaultName(name) {
+			s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "vault name contains invalid characters")
+			return
+		}
+		vc, err := as.GetVaultConfig(name)
+		if err != nil {
+			s.sendError(w, http.StatusInternalServerError, ErrStorageError, "failed to read vault config: "+err.Error())
+			return
+		}
+		resolved := auth.ResolvePlasticity(vc.Plasticity)
+		s.sendJSON(w, http.StatusOK, map[string]any{
+			"config":   vc.Plasticity,
+			"resolved": resolved,
+		})
+	}
+}
+
+// handlePutVaultPlasticity updates the PlasticityConfig for the named vault.
+func (s *Server) handlePutVaultPlasticity(as *auth.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("name")
+		if name == "" {
+			s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "vault name required")
+			return
+		}
+		if !isValidVaultName(name) {
+			s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "vault name contains invalid characters")
+			return
+		}
+		var cfg auth.PlasticityConfig
+		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+			s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "invalid JSON: "+err.Error())
+			return
+		}
+		// Validate override field ranges if provided
+		if cfg.HopDepth != nil && (*cfg.HopDepth < 0 || *cfg.HopDepth > 8) {
+			s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "hop_depth must be 0–8")
+			return
+		}
+		for _, fw := range []*float32{cfg.SemanticWeight, cfg.FTSWeight, cfg.DecayFloor} {
+			if fw != nil && (*fw < 0 || *fw > 1) {
+				s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "weight fields must be 0–1")
+				return
+			}
+		}
+		if cfg.DecayStability != nil && *cfg.DecayStability <= 0 {
+			s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "decay_stability must be > 0")
+			return
+		}
+		if cfg.TraversalProfile != nil {
+			if *cfg.TraversalProfile == "" {
+				cfg.TraversalProfile = nil
+			} else if !activation.ValidProfileName(*cfg.TraversalProfile) {
+				s.sendError(w, http.StatusBadRequest, ErrInvalidEngram,
+					fmt.Sprintf("invalid traversal_profile %q: must be one of: default, causal, confirmatory, adversarial, structural", *cfg.TraversalProfile))
+				return
+			}
+		}
+		preset := cfg.Preset
+		if preset == "" {
+			preset = "default"
+		}
+		if !auth.ValidPlasticityPreset(preset) {
+			s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "unknown preset: "+preset)
+			return
+		}
+		cfg.Preset = preset
+
+		vc, err := as.GetVaultConfig(name)
+		if err != nil {
+			slog.Warn("put vault plasticity: failed to read existing config, creating new",
+				"vault", name, "err", err)
+			vc = auth.VaultConfig{Name: name}
+		}
+		vc.Plasticity = &cfg
+		if err := as.SetVaultConfig(vc); err != nil {
+			s.sendError(w, http.StatusInternalServerError, ErrStorageError, "store error: "+err.Error())
+			return
+		}
+		resolved := auth.ResolvePlasticity(&cfg)
+		s.sendJSON(w, http.StatusOK, map[string]any{
+			"config":   &cfg,
+			"resolved": resolved,
+		})
+	}
+}
+
+// MCPInfoResponse is the response for GET /api/admin/mcp-info.
+type MCPInfoResponse struct {
+	// URL is the full MCP endpoint URL that AI tools connect to.
+	URL string `json:"url"`
+	// TokenConfigured indicates whether a bearer token is required for MCP access.
+	TokenConfigured bool `json:"token_configured"`
+}
+
+// handleMCPInfo returns the MCP endpoint URL and token status for the Connect UI.
+func (s *Server) handleMCPInfo(w http.ResponseWriter, r *http.Request) {
+	addr := s.mcpAddr
+	if addr == "" {
+		addr = ":8750"
+	}
+	// Use net.SplitHostPort to correctly handle all valid net.Listen address forms:
+	// bare ":port", "0.0.0.0:port", "host:port", and IPv6 bracket notation "[::1]:port".
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		// Fallback for misconfigured or empty addresses.
+		host = "localhost"
+		port = "8750"
+	}
+	// A wildcard listen address (empty string, 0.0.0.0, or ::) means the server
+	// is reachable on any interface; present it as localhost in the UI.
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "localhost"
+	}
+	mcpURL := "http://" + host + ":" + port + "/mcp"
+	s.sendJSON(w, http.StatusOK, MCPInfoResponse{
+		URL:             mcpURL,
+		TokenConfigured: s.mcpHasToken,
+	})
+}
+
+// EmbedStatusResponse is the response for GET /api/admin/embed/status.
+type EmbedStatusResponse struct {
+	Provider      string `json:"provider"`
+	Model         string `json:"model"`
+	Enabled       bool   `json:"enabled"`
+	EmbeddedCount int64  `json:"embedded_count"` // -1 = unknown
+	TotalCount    int64  `json:"total_count"`    // -1 = unknown
+	Indexing      bool   `json:"indexing"`
+}
+
+// handleEmbedStatus returns the current embedder configuration and indexing state.
+func (s *Server) handleEmbedStatus(w http.ResponseWriter, r *http.Request) {
+	resp, err := s.engine.Stat(r.Context(), &StatRequest{})
+	totalCount := int64(-1)
+	if err == nil {
+		totalCount = int64(resp.EngramCount)
+	}
+
+	s.sendJSON(w, http.StatusOK, EmbedStatusResponse{
+		Provider:      s.embedProvider,
+		Model:         s.embedModel,
+		Enabled:       s.embedProvider != "" && s.embedProvider != "none",
+		EmbeddedCount: -1, // not tracked per-vault yet
+		TotalCount:    totalCount,
+		Indexing:      false, // RetroactiveProcessor state not wired to REST yet
+	})
+}
+
+// PluginStatusResponse is one entry in GET /api/admin/plugins.
+type PluginStatusResponse struct {
+	Name      string    `json:"name"`
+	Tier      int       `json:"tier"` // 2=embed, 3=enrich
+	Healthy   bool      `json:"healthy"`
+	LastCheck time.Time `json:"last_check"`
+	Error     string    `json:"error,omitempty"`
+	Provider  string    `json:"provider,omitempty"` // embed plugins only
+	Model     string    `json:"model,omitempty"`    // embed plugins only
+}
+
+// handlePlugins returns the list of registered plugins with runtime status.
+func (s *Server) handlePlugins(w http.ResponseWriter, r *http.Request) {
+	if s.pluginRegistry == nil {
+		s.sendJSON(w, http.StatusOK, []PluginStatusResponse{})
+		return
+	}
+	list := s.pluginRegistry.List()
+	out := make([]PluginStatusResponse, 0, len(list))
+	for _, p := range list {
+		entry := PluginStatusResponse{
+			Name:      p.Name,
+			Tier:      int(p.Tier),
+			Healthy:   p.Healthy,
+			LastCheck: p.LastCheck,
+			Error:     p.Error,
+		}
+		if p.Tier == plugin.TierEmbed {
+			entry.Provider = s.embedProvider
+			entry.Model = s.embedModel
+		}
+		out = append(out, entry)
+	}
+	s.sendJSON(w, http.StatusOK, out)
+}
+
+// handleGetPluginConfig returns the saved plugin configuration from disk.
+func (s *Server) handleGetPluginConfig(w http.ResponseWriter, r *http.Request) {
+	if s.dataDir == "" {
+		s.sendJSON(w, http.StatusOK, plugincfg.PluginConfig{})
+		return
+	}
+	cfg, err := plugincfg.LoadPluginConfig(s.dataDir)
+	if err != nil {
+		s.sendError(w, http.StatusInternalServerError, ErrStorageError, "failed to load plugin config: "+err.Error())
+		return
+	}
+	s.sendJSON(w, http.StatusOK, cfg)
+}
+
+// handlePutPluginConfig saves plugin configuration to disk.
+// A server restart is required for changes to take effect.
+func (s *Server) handlePutPluginConfig(w http.ResponseWriter, r *http.Request) {
+	if s.dataDir == "" {
+		s.sendError(w, http.StatusInternalServerError, ErrStorageError, "data directory not configured")
+		return
+	}
+	var cfg plugincfg.PluginConfig
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "invalid request body: "+err.Error())
+		return
+	}
+	if err := plugincfg.SavePluginConfig(s.dataDir, cfg); err != nil {
+		s.sendError(w, http.StatusInternalServerError, ErrStorageError, "failed to save plugin config: "+err.Error())
+		return
+	}
+	s.sendJSON(w, http.StatusOK, cfg)
+}
+
+// handleDeleteVault deletes a vault and all its data.
+// Requires X-Allow-Default: true to delete the "default" vault.
+func (s *Server) handleDeleteVault(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "vault name required")
+		return
+	}
+	if !isValidVaultName(name) {
+		s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "vault name contains invalid characters")
+		return
+	}
+	if name == "default" {
+		if r.Header.Get("X-Allow-Default") != "true" {
+			s.sendError(w, http.StatusConflict, ErrVaultForbidden, "cannot delete default vault without X-Allow-Default: true header")
+			return
+		}
+	}
+	if err := s.engine.DeleteVault(r.Context(), name); err != nil {
+		if errors.Is(err, engine.ErrVaultNotFound) {
+			s.sendError(w, http.StatusNotFound, ErrVaultNotFound, err.Error())
+			return
+		}
+		if errors.Is(err, engine.ErrVaultJobActive) {
+			s.sendError(w, http.StatusConflict, ErrVaultForbidden, err.Error())
+			return
+		}
+		s.sendError(w, http.StatusInternalServerError, ErrStorageError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleClearVault removes all engrams from a vault, leaving the vault intact.
+// Requires X-Allow-Default: true to clear the "default" vault.
+func (s *Server) handleClearVault(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "vault name required")
+		return
+	}
+	if !isValidVaultName(name) {
+		s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "vault name contains invalid characters")
+		return
+	}
+	if name == "default" {
+		if r.Header.Get("X-Allow-Default") != "true" {
+			s.sendError(w, http.StatusConflict, ErrVaultForbidden, "cannot clear default vault without X-Allow-Default: true header")
+			return
+		}
+	}
+	if err := s.engine.ClearVault(r.Context(), name); err != nil {
+		if errors.Is(err, engine.ErrVaultNotFound) {
+			s.sendError(w, http.StatusNotFound, ErrVaultNotFound, err.Error())
+			return
+		}
+		s.sendError(w, http.StatusInternalServerError, ErrStorageError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleCloneVault starts an async clone of the named vault.
+// POST /api/admin/vaults/{name}/clone
+// Body: {"new_name": "vault-b"}
+// Response 202: {"job_id": "..."}
+func (s *Server) handleCloneVault(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "vault name required")
+		return
+	}
+	var req struct {
+		NewName string `json:"new_name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.NewName == "" {
+		s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "new_name required in body")
+		return
+	}
+	if !isValidVaultName(req.NewName) {
+		s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "new_name must be 1–64 lowercase alphanumeric characters, hyphens, or underscores")
+		return
+	}
+	if req.NewName == name {
+		s.sendError(w, http.StatusConflict, ErrVaultForbidden, "cannot clone a vault onto itself")
+		return
+	}
+	job, err := s.engine.StartClone(r.Context(), name, req.NewName)
+	if err != nil {
+		if errors.Is(err, engine.ErrVaultNotFound) {
+			s.sendError(w, http.StatusNotFound, ErrVaultNotFound, err.Error())
+			return
+		}
+		s.sendError(w, http.StatusInternalServerError, ErrStorageError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]string{"job_id": job.ID})
+}
+
+// handleMergeVault starts an async merge of the named source vault into a target vault.
+// POST /api/admin/vaults/{name}/merge-into
+// Body: {"target": "vault-b", "delete_source": false}
+// Response 202: {"job_id": "..."}
+func (s *Server) handleMergeVault(w http.ResponseWriter, r *http.Request) {
+	source := r.PathValue("name")
+	if source == "" {
+		s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "source vault name required")
+		return
+	}
+	var req struct {
+		Target       string `json:"target"`
+		DeleteSource bool   `json:"delete_source"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Target == "" {
+		s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "target required in body")
+		return
+	}
+	if !isValidVaultName(req.Target) {
+		s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "target must be 1–64 lowercase alphanumeric characters, hyphens, or underscores")
+		return
+	}
+	if source == req.Target {
+		s.sendError(w, http.StatusConflict, ErrVaultForbidden, "source and target must be different")
+		return
+	}
+	job, err := s.engine.StartMerge(r.Context(), source, req.Target, req.DeleteSource)
+	if err != nil {
+		if errors.Is(err, engine.ErrVaultNotFound) {
+			s.sendError(w, http.StatusNotFound, ErrVaultNotFound, err.Error())
+			return
+		}
+		s.sendError(w, http.StatusInternalServerError, ErrStorageError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]string{"job_id": job.ID})
+}
+
+// handleVaultJobStatus returns the current status of a vault clone/merge job.
+// GET /api/admin/vaults/{name}/job-status?job_id=...
+// Response 200: StatusSnapshot JSON
+func (s *Server) handleVaultJobStatus(w http.ResponseWriter, r *http.Request) {
+	jobID := r.URL.Query().Get("job_id")
+	if jobID == "" {
+		s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "job_id query parameter required")
+		return
+	}
+	job, ok := s.engine.GetVaultJob(jobID)
+	if !ok {
+		s.sendError(w, http.StatusNotFound, ErrVaultNotFound, "job not found")
+		return
+	}
+	name := r.PathValue("name")
+	if job.Source != name && job.Target != name {
+		s.sendError(w, http.StatusNotFound, ErrVaultNotFound, "job not found for this vault")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(job.Snapshot())
+}

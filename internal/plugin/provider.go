@@ -1,0 +1,153 @@
+package plugin
+
+import (
+	"fmt"
+	"net/url"
+	"strconv"
+	"strings"
+)
+
+// ProviderScheme identifies the provider type.
+type ProviderScheme string
+
+const (
+	SchemeOllama    ProviderScheme = "ollama"
+	SchemeOpenAI    ProviderScheme = "openai"
+	SchemeAnthropic ProviderScheme = "anthropic"
+	SchemeVoyage    ProviderScheme = "voyage"
+)
+
+// ProviderConfig holds the parsed provider configuration.
+type ProviderConfig struct {
+	Scheme  ProviderScheme // ollama, openai, anthropic, voyage
+	Host    string         // resolved host (e.g., "localhost" or "api.openai.com")
+	Port    int            // resolved port (e.g., 11434 or 443)
+	Model   string         // model name (e.g., "nomic-embed-text")
+	BaseURL string         // fully constructed base URL (e.g., "http://localhost:11434")
+}
+
+// ParseProviderURL parses a provider URL and returns a ProviderConfig.
+// Supports:
+//   - ollama://host:port/model
+//   - openai://model
+//   - anthropic://model
+//   - voyage://model
+func ParseProviderURL(raw string) (*ProviderConfig, error) {
+	if raw == "" {
+		return nil, fmt.Errorf("empty provider URL")
+	}
+
+	// Parse as a URL
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("malformed provider URL: %w", err)
+	}
+
+	scheme := ProviderScheme(parsed.Scheme)
+	config := &ProviderConfig{
+		Scheme: scheme,
+	}
+
+	switch scheme {
+	case SchemeOllama:
+		return parseOllamaURL(parsed, config)
+	case SchemeOpenAI:
+		return parseOpenAIURL(parsed, config)
+	case SchemeAnthropic:
+		return parseAnthropicURL(parsed, config)
+	case SchemeVoyage:
+		return parseVoyageURL(parsed, config)
+	default:
+		return nil, fmt.Errorf("unknown provider scheme: %q", scheme)
+	}
+}
+
+func parseOllamaURL(parsed *url.URL, config *ProviderConfig) (*ProviderConfig, error) {
+	// ollama://host:port/model
+	host := parsed.Hostname()
+	if host == "" {
+		return nil, fmt.Errorf("ollama URL requires a host")
+	}
+	config.Host = host
+
+	portStr := parsed.Port()
+	if portStr == "" {
+		return nil, fmt.Errorf("ollama URL requires a port (e.g., ollama://localhost:11434/model)")
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid port in ollama URL: %w", err)
+	}
+	config.Port = port
+
+	// Model is the path (without leading /)
+	model := strings.TrimPrefix(parsed.Path, "/")
+	if model == "" {
+		return nil, fmt.Errorf("ollama URL requires a model (e.g., ollama://localhost:11434/nomic-embed-text)")
+	}
+	config.Model = model
+
+	config.BaseURL = fmt.Sprintf("http://%s:%d", config.Host, config.Port)
+	return config, nil
+}
+
+func parseOpenAIURL(parsed *url.URL, config *ProviderConfig) (*ProviderConfig, error) {
+	// openai://model
+	model := parsed.Hostname()
+	if model == "" {
+		// Try to get model from the path (openai:///model-name would parse differently)
+		model = strings.TrimPrefix(parsed.Path, "/")
+		if model == "" && parsed.Opaque != "" {
+			model = parsed.Opaque
+		}
+	}
+	if model == "" {
+		return nil, fmt.Errorf("openai URL requires a model (e.g., openai://text-embedding-3-small)")
+	}
+	config.Model = model
+
+	config.Host = "api.openai.com"
+	config.Port = 443
+	config.BaseURL = "https://api.openai.com"
+	return config, nil
+}
+
+func parseAnthropicURL(parsed *url.URL, config *ProviderConfig) (*ProviderConfig, error) {
+	// anthropic://model
+	model := parsed.Hostname()
+	if model == "" {
+		model = strings.TrimPrefix(parsed.Path, "/")
+		if model == "" && parsed.Opaque != "" {
+			model = parsed.Opaque
+		}
+	}
+	if model == "" {
+		return nil, fmt.Errorf("anthropic URL requires a model (e.g., anthropic://claude-haiku)")
+	}
+	config.Model = model
+
+	config.Host = "api.anthropic.com"
+	config.Port = 443
+	config.BaseURL = "https://api.anthropic.com"
+	return config, nil
+}
+
+func parseVoyageURL(parsed *url.URL, config *ProviderConfig) (*ProviderConfig, error) {
+	// voyage://model
+	model := parsed.Hostname()
+	if model == "" {
+		model = strings.TrimPrefix(parsed.Path, "/")
+		if model == "" && parsed.Opaque != "" {
+			model = parsed.Opaque
+		}
+	}
+	if model == "" {
+		return nil, fmt.Errorf("voyage URL requires a model (e.g., voyage://voyage-3)")
+	}
+	config.Model = model
+
+	config.Host = "api.voyageai.com"
+	config.Port = 443
+	config.BaseURL = "https://api.voyageai.com"
+	return config, nil
+}

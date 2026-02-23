@@ -1,0 +1,76 @@
+package auth
+
+import (
+	"encoding/json"
+	"fmt"
+	"log/slog"
+
+	"github.com/cockroachdb/pebble"
+)
+
+// GetVaultConfig returns the config for a vault.
+//
+// SECURITY NOTE — FAIL-CLOSED BEHAVIOR:
+// When no config exists for a vault (pebble.ErrNotFound), this function returns
+// {Public: false}. This is a FAIL-CLOSED default: any vault that has never been
+// explicitly configured requires an API key for access.
+//
+// Operators must explicitly configure vaults via SetVaultConfig to allow public
+// (unauthenticated) access. A warning is logged on every access to an
+// unconfigured vault so that operators are alerted.
+//
+// To allow unauthenticated access to a vault, explicitly set Public: true:
+//
+//	store.SetVaultConfig(auth.VaultConfig{Name: "myvault", Public: true})
+func (s *Store) GetVaultConfig(vault string) (VaultConfig, error) {
+	data, closer, err := s.db.Get(vaultConfigKey(vault))
+	if err != nil {
+		// Fail-closed: any vault that has never been explicitly configured
+		// requires an API key. Operators should call SetVaultConfig to
+		// establish an explicit policy for each vault.
+		slog.Warn("vault has no explicit config — defaulting to locked access (fail-closed); call SetVaultConfig to set an explicit policy",
+			"vault", vault,
+		)
+		return VaultConfig{Name: vault, Public: false}, nil
+	}
+	defer closer.Close()
+
+	var cfg VaultConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return VaultConfig{}, fmt.Errorf("corrupt vault config: %w", err)
+	}
+	return cfg, nil
+}
+
+// SetVaultConfig persists the vault configuration.
+func (s *Store) SetVaultConfig(cfg VaultConfig) error {
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("marshal vault config: %w", err)
+	}
+	return s.db.Set(vaultConfigKey(cfg.Name), data, pebble.Sync)
+}
+
+// ListVaultConfigs returns all explicitly configured vaults.
+func (s *Store) ListVaultConfigs() ([]VaultConfig, error) {
+	lower := []byte{prefixVaultCfg}
+	upper := vaultConfigUpperBound()
+
+	iter, err := s.db.NewIter(&pebble.IterOptions{
+		LowerBound: lower,
+		UpperBound: upper,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("new iter: %w", err)
+	}
+	defer iter.Close()
+
+	var cfgs []VaultConfig
+	for iter.First(); iter.Valid(); iter.Next() {
+		var cfg VaultConfig
+		if err := json.Unmarshal(iter.Value(), &cfg); err == nil {
+			cfgs = append(cfgs, cfg)
+		}
+	}
+	return cfgs, iter.Error()
+}

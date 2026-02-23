@@ -1,0 +1,347 @@
+# Architecture
+
+MuninnDB is a purpose-built cognitive database. It ships as a single Go binary. Raw key-value storage is Pebble. Everything else — the storage format, indexes, cognitive workers, wire protocols, activation engine, trigger system — is MuninnDB. There are no external dependencies at runtime.
+
+---
+
+## 1. Overview
+
+```
+Consumers (AI agents, applications, Claude, Cursor)
+    ↓ MBP / REST / MCP
+┌─────────────────────────────────────────────────────┐
+│  Interface Layer                                     │
+│  8474: MBP (native binary protocol, TCP)            │
+│  8475: REST API (JSON)                              │
+│  8750: MCP (JSON-RPC)                               │
+│  8476: Web UI + health + metrics                    │
+└────────────────────────┬────────────────────────────┘
+                         ↓
+┌─────────────────────────────────────────────────────┐
+│  Plugin Layer (optional, zero required)             │
+│  • muninndb-embed: HNSW vectors + retroactive       │
+│  • muninndb-enrich: LLM summaries + entities        │
+└────────────────────────┬────────────────────────────┘
+                         ↓
+┌─────────────────────────────────────────────────────┐
+│  Core Engine                                        │
+│  • Write path (<10ms ACK guarantee)                 │
+│  • 6-phase ACTIVATE pipeline                        │
+│  • Cognitive workers (async, never block)           │
+│    decay · hebbian · contradiction · confidence     │
+│  • Semantic trigger system                          │
+└────────────────────────┬────────────────────────────┘
+                         ↓
+┌─────────────────────────────────────────────────────┐
+│  Index Layer                                        │
+│  • Inverted (BM25 full-text search)                 │
+│  • HNSW (vector similarity, plugin-activated)       │
+│  • Adjacency (association graph, forward+reverse)   │
+│  • Secondary (state, tag, creator)                  │
+└────────────────────────┬────────────────────────────┘
+                         ↓
+┌─────────────────────────────────────────────────────┐
+│  ERF Storage + Pebble KV                            │
+│  • Hot: in-memory cache (sync.Map)                  │
+│  • Warm: on-disk, high relevance                    │
+│  • Cold: compressed, dormant                        │
+└─────────────────────────────────────────────────────┘
+```
+
+The plugin layer is intentionally optional. MuninnDB without any plugins is a fully functional cognitive database: full-text search, decay, Hebbian association, contradiction detection, Bayesian confidence updates, and graph traversal all work without an embedding model or LLM. The embed plugin adds vector search. The enrich plugin adds semantic contradiction detection and LLM-powered enrichment. Neither is required.
+
+---
+
+## 2. The Write Path
+
+The write path has one contract with the client: your write is durable in under 10 milliseconds. Everything else — indexing, cognitive updates, trigger evaluation — happens after the ACK, asynchronously, without affecting write latency.
+
+**Step 1: Validate and encode**
+The incoming engram is validated (field lengths, state transitions, association limits) and encoded to ERF binary. ERF encoding is fast — fixed-size header and metadata sections, zstd compression only for content fields above 512 bytes.
+
+**Step 2: MOL fsync**
+An entry is written to the Muninn Operation Log and fsynced to disk. This is the durability guarantee. If the process is killed after this point, the write is recoverable from the MOL on restart. Operations are idempotent by ULID — replaying the MOL twice produces the same state as replaying it once.
+
+**Step 3: Pebble batch commit**
+The ERF-encoded engram is committed to Pebble via a batch write. Pebble's group committer collects concurrent writes from multiple goroutines and flushes them together — this is the same technique as group commit in traditional databases, and it has the same effect: throughput scales with concurrency without sacrificing latency.
+
+**Step 4: Client ACK**
+The client receives its acknowledgment. At this point the write is durable. A `kill -9` immediately after the ACK loses nothing.
+
+**Step 5: Async index updates**
+The inverted index, adjacency graph, and secondary indexes are updated. These happen off the critical path.
+
+**Step 6: Async cognitive worker notifications**
+The decay worker re-evaluates its scheduling heap. The Hebbian worker is queued. The trigger system evaluates subscriptions. All notifications use non-blocking channel sends — if a worker's input channel is full because it is processing a large batch, the notification is dropped. The worker will process the engram on its next sweep.
+
+This is a deliberate design choice. The write path must not be held hostage to background processing speed. The cognitive workers are eventually consistent. They are not behind on correctness — an engram that hasn't been processed by the decay worker yet simply hasn't had its relevance score recomputed. That is acceptable. A write that takes 50ms because the Hebbian worker was busy is not.
+
+---
+
+## 3. The 6-Phase Activation Engine
+
+ACTIVATE is the primary read operation in MuninnDB. It is not a query in the SQL sense — it is activation, the same word used in cognitive science for how context spreads through a memory network and surfaces related content.
+
+The question ACTIVATE answers is: *given this context, what should I be thinking about right now?*
+
+### Phase 1: Embed and Tokenize
+
+The context string is processed in parallel:
+- If the embed plugin is active, the context is embedded to a `float32` vector for semantic similarity search
+- The context is tokenized for FTS: case-folded, stop words removed, trigram fallback applied for short tokens, minimum 2 characters
+- If the client includes a precomputed embedding in the request, it is used directly — the embed plugin call is skipped
+
+### Phase 2: Parallel Retrieval
+
+Three goroutines run concurrently via `errgroup`, each querying a different index:
+
+**FTS goroutine:** BM25 query against the inverted index. Uses field-weighted scoring (concept=3.0, tags=2.0, content=1.0, creator=0.5). Returns a ranked list of engrams matching the tokenized query terms.
+
+**HNSW goroutine:** Cosine similarity search in the in-memory vector index. Returns approximate nearest neighbors by embedding. No-op if the embed plugin is not active.
+
+**Decay pool goroutine:** Returns recently-accessed engrams above the relevance floor. This is the temporal signal — it captures context that is cognitively active right now, even if it does not textually or semantically match the current query. An engram you accessed five minutes ago is probably relevant even if the words do not overlap.
+
+All three results are collected when all three goroutines complete.
+
+### Phase 3: Reciprocal Rank Fusion
+
+RRF merges three ranked lists into one unified ranking without requiring score normalization across different scoring systems.
+
+The formula is:
+
+```
+score(d) = Σ 1 / (k + rank(d, list_i))
+```
+
+An engram that ranks highly in multiple lists scores higher than one that dominates a single list. The `k` constant controls how much top-rank positions are rewarded over lower positions.
+
+MuninnDB uses custom k values calibrated to each signal's precision:
+- FTS: k=60 (tightly ranked signal, precision matters)
+- HNSW: k=40 (even tighter — cosine similarity is a strong signal when the embed plugin is active)
+- Decay pool: k=120 (looser signal — temporal relevance is a weaker predictor of query relevance, so top positions are less heavily rewarded)
+
+The result is a single ranked list built from three orthogonal signals: textual, semantic, and temporal.
+
+### Phase 4: Hebbian Boost
+
+The activation log — a ring buffer of recent ACTIVATE calls — is consulted. Engrams that co-appeared in recent activations receive a score boost proportional to:
+- How recently they co-appeared
+- How frequently they co-appeared
+- The scores at which they co-appeared (high-confidence co-activations produce stronger Hebbian signal)
+
+This implements Hebb's Rule at query time: ideas that have fired together recently are more likely to fire together again.
+
+### Phase 5: BFS Association Traversal
+
+Starting from the top-K candidates from Phase 4, the association graph is traversed breadth-first.
+
+**Hop penalty:** Each graph hop multiplies the score by 0.7. An engram directly in the retrieval set scores at full weight. An engram one hop away scores at 70%. Two hops away scores at 49%. This ensures that direct candidates always rank above discovered associations, and discovered associations rank in proportion to their graph distance.
+
+**Max nodes:** 500 nodes explored per activation. On a dense graph, BFS without a cap will spend unbounded time discovering tenuous connections. 500 nodes is empirically sufficient to surface meaningful associations without the traversal becoming the bottleneck.
+
+The BFS step discovers engrams that were not in the original retrieval set but are strongly connected to what was found. This is how MuninnDB surfaces context you did not know to ask for.
+
+### Phase 6: Final Scoring, Filter, and Response
+
+**Composite score:**
+
+```
+score = (semantic × 0.35)
+      + (FTS      × 0.25)
+      + (decay    × 0.20)
+      + (Hebbian  × 0.10)
+      + (access   × 0.05)
+      + (recency  × 0.05)
+```
+
+Then multiplied by confidence. A 0.3-confidence engram scores 30% of what it would at full confidence — it ranks lower automatically, without being excluded from results.
+
+**Filters** are applied: lifecycle state (ARCHIVED engrams excluded by default), tag filters, date ranges, creator filters.
+
+**"Why" explanations** are built per result: which retrieval signals matched, what associations were traversed, how the score was composed. These are included in the response so consumers can understand why each engram surfaced.
+
+**Streaming:** Results are streamed to the client as they are scored. The client starts receiving results before the full result set is finalized.
+
+---
+
+## 4. Cognitive Workers
+
+Four async goroutines run continuously in the background, evolving the database's cognitive state. None of them block reads or writes. All of them use non-blocking Submit — if a worker's input channel is full, the item is dropped, not queued indefinitely.
+
+The infrastructure is a generic `Worker[T]` type with configurable batch size and max-wait timeout. Each worker drains its input channel in batches, processes the batch, and sleeps until the next input arrives. Telemetry tracks processed count, batch count, error count, and drop count per worker.
+
+### Decay Worker
+
+The decay worker maintains a min-heap ordered by `(next_decay_time, engram_id)`. It sleeps until the next engram is due for a relevance recomputation, wakes, processes the due entries, reschedules them, and sleeps again.
+
+Relevance is computed from timestamps on every wake — `R(t) = max(floor, exp(-t/S))` — never from accumulated floating-point state. This means relevance values are always correct regardless of how long the worker has been running or how many times it has processed a given engram.
+
+O(log n) heap operations. The worker never polls. It never wakes unnecessarily. It wakes exactly when an engram is scheduled to cross a meaningful relevance threshold.
+
+### Hebbian Worker
+
+The Hebbian worker processes co-activation events produced by ACTIVATE calls. When an ACTIVATE call returns a result set, each pair of engrams in the result set generates a co-activation event.
+
+The canonical pair key is `(min(idA, idB), max(idA, idB))` — since ULIDs are lexicographically comparable, smaller first produces a unique, consistent key for any ordered pair. This deduplicates bidirectional association updates.
+
+Weight updates use a multiplicative formula (detailed in `cognitive-primitives.md`). The key properties: each co-activation strengthens the association, dormancy weakens it, and the magnitude of the update is proportional to the confidence of both engrams at activation time.
+
+### Contradiction Worker
+
+Two detection modes run in the contradiction worker:
+
+**Structural:** Uses a 64×64 boolean matrix for O(1) contradiction lookup. The matrix is a static, init-time table encoding which relationship types are logically incompatible (e.g., `supports` and `contradicts` for the same pair). When the contradiction worker finds two engrams holding incompatible relationship types with a common third engram, it fires a contradiction event.
+
+**Semantic:** When the enrich plugin is active, the plugin fires contradiction events when LLM analysis detects logical contradiction. These events arrive via an event channel and are processed by the contradiction worker.
+
+On contradiction detection, the contradiction worker:
+1. Fires immediately to the trigger system at highest priority (not rate-limited)
+2. Queues both engrams for Bayesian confidence updates
+3. Creates a typed `contradicts` association between the two engrams
+4. Pushes a notification to any active subscriptions that include these engrams
+
+### Confidence Worker
+
+Processes confidence update events from contradiction detection and reinforcement signals. Applies the Bayesian posterior formula with Laplace smoothing (detailed in `cognitive-primitives.md`). Updates the stored confidence in the engram's ERF metadata block — touching only the fixed-offset metadata section, not the full record.
+
+Confidence updates immediately affect activation scoring because confidence is a multiplier applied in Phase 6. There is no lag between a confidence update and its effect on results.
+
+---
+
+## 5. Index Layer
+
+### Inverted Index (Full-Text Search)
+
+BM25 scoring with field-weighted term frequencies. Field weights:
+- `concept`: 3.0 — what the engram is about; highest signal
+- `tags`: 2.0 — curated labels; stronger than content
+- `content`: 1.0 — detailed but potentially noisy
+- `creator`: 0.5 — attribution; weakest signal
+
+Trigram fallback: for query terms shorter than 3 characters, or when exact term matching yields no results, the index falls back to trigram overlap scoring. This handles substrings and approximate matches without requiring a separate fuzzy search path.
+
+Pebble key structure for the inverted index: `0x05 | term | 0x00 | ulid → posting list`. The posting list carries term frequency per field and field presence flags, allowing BM25 computation without reading the full engram record.
+
+### HNSW Vector Index
+
+Hierarchical Navigable Small World graph. In-memory per vault. O(log n) approximate nearest neighbor search with cosine similarity.
+
+The HNSW graph is loaded from Pebble on startup and snapshotted back on graceful shutdown. Between snapshots, all mutations are in memory. This keeps vector search at memory speed — no disk I/O on the hot path.
+
+Only activated when the embed plugin is present. Without the embed plugin, the HNSW goroutine in Phase 2 is a no-op and contributes no results to RRF.
+
+### Adjacency Graph
+
+Forward index (`engram → targets`) and reverse index (`engram ← sources`) stored in separate Pebble namespaces (0x03 forward, 0x04 reverse). The reverse index makes "what points to this engram?" efficient — critical for impact analysis when an engram's confidence or state changes.
+
+Within each adjacency list, edges are stored weight-sorted. BFS in Phase 5 explores the heaviest edges first, which means the most significant associations are discovered before the traversal cap (500 nodes) is reached.
+
+### Secondary Indexes
+
+Thin indexes for lifecycle state, tag membership, and creator. Used for filter operations in Phase 6 and for administrative queries. Namespace 0x0B for the state index. These are small and fast — they store only the engram ULID, not the full record.
+
+---
+
+## 6. Wire Protocols
+
+Three protocols are currently active. All share the same underlying engine — they are interface adapters, not separate implementations.
+
+### MBP — Port 8474 (Muninn Binary Protocol)
+
+Native binary protocol over TCP. 16-byte fixed header:
+
+```
+version(1) | type(1) | flags(2) | length(4) | correlation_id(8)
+```
+
+MessagePack payload. The correlation ID enables pipelining — a client can send multiple requests without waiting for responses, and route incoming responses by correlation ID. Responses can arrive out of order. This eliminates round-trip latency for bulk operations.
+
+22 message types covering all CRUD operations, ACTIVATE, subscription management, and admin commands. This is the lowest-latency protocol. Use it for any client where you control the implementation.
+
+### REST — Port 8475
+
+JSON over HTTP. Standard resource-oriented API:
+- `POST /api/engrams` — write
+- `GET /api/engrams/:id` — point read
+- `PUT /api/engrams/:id` — update
+- `DELETE /api/engrams/:id` — state transition (not hard delete by default)
+- `POST /api/activate` — activation query
+- `GET /api/admin/*` — administrative operations
+
+Slowest of the three — JSON serialization overhead and no pipelining. Most compatible. Use it when you need to integrate from an environment that cannot use binary protocols.
+
+### MCP — Port 8750
+
+JSON-RPC over HTTP. Implements the Model Context Protocol for direct integration with AI agents.
+
+17 tools exposed:
+
+| Tool | Operation |
+|---|---|
+| `remember` | Write an engram |
+| `recall` | Activation query |
+| `read` | Point read by ID |
+| `forget` | Archive or delete |
+| `link` | Create association |
+| `contradictions` | List contradiction pairs |
+| `status` | Vault health and statistics |
+| `evolve` | Update engram content or confidence |
+| `consolidate` | Merge similar engrams |
+| `session` | Session context management |
+| `decide` | Record a decision with confidence |
+| `restore` | Restore an archived engram |
+| `traverse` | Walk the association graph |
+| `explain` | Explain why an engram scored as it did |
+| `state` | Transition engram lifecycle state |
+| `list_deleted` | List soft-deleted engrams |
+| `retry_enrich` | Re-run enrichment on failed engrams |
+
+MCP integration allows Claude, Cursor, and any other MCP-compatible client to use MuninnDB as their persistent memory without custom integration work.
+
+### Web UI — Port 8476
+
+Browser-based UI for browsing engrams, visualizing the association graph, and monitoring vault health. Also serves health and metrics endpoints.
+
+---
+
+## 7. The Muninn Operation Log (MOL)
+
+The MOL is MuninnDB's write-ahead log, backed by Pebble. Every write operation is logged and fsynced before the client ACK is sent.
+
+On startup, MuninnDB replays the MOL to rebuild any state that was not flushed to the main KV store before the last shutdown. Operations in the MOL are idempotent by ULID — replaying a write that is already present in the KV store is a no-op, not a duplicate. This makes crash recovery correct regardless of where in a write sequence the process was interrupted.
+
+The MOL is what makes the `<10ms ACK` guarantee meaningful. Without the MOL fsync, the ACK would mean "I have it in memory." With the MOL fsync, the ACK means "I have it on disk, and I can recover it even if you kill -9 me right now."
+
+Log entries are compacted once they have been confirmed present in the main KV store. The MOL does not grow unboundedly.
+
+---
+
+## 8. Performance Targets
+
+| Operation | Target | Notes |
+|---|---|---|
+| Write (ACK) | <10ms | ERF encode + MOL fsync + Pebble batch commit |
+| Point read | <2ms | L1 cache hit typical; sync.Map before Pebble |
+| Activation query | <20ms | Full 6-phase pipeline, parallel Phase 2 |
+| FTS only | <5ms | Inverted index + BM25, no graph traversal |
+| Vector search only | <10ms | HNSW approximate NN in memory |
+| BFS depth-2 | <5ms | Weight-sorted adjacency graph traversal |
+
+The write ACK target is a hard guarantee. The query targets are design targets — actual performance depends on vault size, result set size, and hardware, but these are the numbers the system is designed around.
+
+---
+
+## 9. Scale Characteristics
+
+| Tier | Engrams | Disk | Deployment |
+|---|---|---|---|
+| Personal | 10K | 17–40MB | Single binary |
+| Power user | 100K | 170–400MB | Docker |
+| Team | 1M | 1.7–4GB | Single node |
+| Enterprise | 100M+ | 170–400GB | Sharded cluster |
+
+Disk estimates assume ~1.7KB average with embedding, ~400 bytes without. Actual usage depends heavily on content length.
+
+**Vault sharding:** Memory is personal. Each vault is an isolated namespace with its own indexes, its own HNSW graph, and its own cognitive worker state. Horizontal scaling is natural: shard by vault. A sharded cluster routes ACTIVATE requests to the correct vault shard and federates results when multi-vault activation is requested.
+
+The single-binary deployment tier is intentional. MuninnDB should be trivially deployable for personal or small team use without infrastructure overhead. The same binary that runs as a personal memory store for one user can be the node in a sharded cluster serving 100 million engrams across an enterprise.

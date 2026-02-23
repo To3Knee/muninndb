@@ -1,0 +1,47 @@
+# Stage 1: Fetch assets and build
+# go:embed directives require the ORT native library and ONNX model to exist at compile time.
+FROM golang:1.24-bookworm AS builder
+
+WORKDIR /src
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl make ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY . .
+
+# Fetch only what linux/amd64 needs (skips darwin libs to speed up the build).
+# - model_int8.onnx + tokenizer.json: required by local_assets_common.go go:embed
+# - libonnxruntime_linux_amd64.so:    required by local_assets_linux_amd64.go go:embed
+RUN make fetch-model _ort-linux-amd64
+
+# Build the server binary.
+# CGO_ENABLED=0 would break the local ONNX embedder (dlopen at runtime).
+# The binary links against glibc — debian-slim provides it in the runtime stage.
+RUN go build -ldflags="-s -w" -o /muninndb-server ./cmd/muninn/...
+
+# Stage 2: Minimal runtime image
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /muninndb-server /usr/local/bin/muninndb-server
+
+# Persistent data volume — Pebble DB, WAL, and auth secrets live here.
+VOLUME ["/data"]
+
+# MBP protocol  8474
+# REST API       8475
+# Web UI         8476
+# gRPC           8477
+# MCP / AI tools 8750
+EXPOSE 8474 8475 8476 8477 8750
+
+# MUNINN_LOCAL_EMBED=1 activates the bundled all-MiniLM-L6-v2 model.
+# Override to "" and set MUNINN_OPENAI_KEY or MUNINN_OLLAMA_URL to use an external embedder.
+ENV MUNINN_LOCAL_EMBED=1
+
+ENTRYPOINT ["muninndb-server"]
+CMD ["--daemon", "--data", "/data"]

@@ -1,0 +1,499 @@
+package rest
+
+import (
+	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/cockroachdb/pebble"
+	"github.com/cockroachdb/pebble/vfs"
+	"github.com/scrypster/muninndb/internal/auth"
+	"github.com/scrypster/muninndb/internal/config"
+	"github.com/scrypster/muninndb/internal/plugin"
+	"github.com/scrypster/muninndb/internal/replication"
+)
+
+func newTestAuthStore(t *testing.T) *auth.Store {
+	t.Helper()
+	db, err := pebble.Open("", &pebble.Options{FS: vfs.NewMem()})
+	if err != nil {
+		t.Fatalf("open test db: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return auth.NewStore(db)
+}
+
+func newTestServer(t *testing.T, store *auth.Store) *Server {
+	t.Helper()
+	return NewServer("localhost:0", &MockEngine{}, store, nil, nil, EmbedInfo{}, nil, "")
+}
+
+// TestCreateAPIKey tests POST /api/admin/keys
+func TestCreateAPIKey(t *testing.T) {
+	store := newTestAuthStore(t)
+	srv := newTestServer(t, store)
+
+	body, _ := json.Marshal(map[string]string{
+		"vault": "default",
+		"label": "test-agent",
+		"mode":  "full",
+	})
+	req := httptest.NewRequest("POST", "/api/admin/keys", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	token, ok := resp["token"].(string)
+	if !ok || token == "" {
+		t.Fatal("expected non-empty token in response")
+	}
+	if len(token) < 10 {
+		t.Fatalf("token looks too short: %q", token)
+	}
+	if _, ok := resp["key"]; !ok {
+		t.Fatal("expected key metadata in response")
+	}
+}
+
+// TestCreateAPIKeyInvalidMode tests that an invalid mode is rejected
+func TestCreateAPIKeyInvalidMode(t *testing.T) {
+	store := newTestAuthStore(t)
+	srv := newTestServer(t, store)
+
+	body, _ := json.Marshal(map[string]string{
+		"vault": "default",
+		"label": "bad-key",
+		"mode":  "superuser",
+	})
+	req := httptest.NewRequest("POST", "/api/admin/keys", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid mode, got %d", w.Code)
+	}
+}
+
+// TestListAPIKeys tests GET /api/admin/keys?vault=default
+func TestListAPIKeys(t *testing.T) {
+	store := newTestAuthStore(t)
+	srv := newTestServer(t, store)
+
+	// Create a key first
+	body, _ := json.Marshal(map[string]string{"vault": "default", "label": "x", "mode": "observe"})
+	createReq := httptest.NewRequest("POST", "/api/admin/keys", bytes.NewReader(body))
+	createReq.Header.Set("Content-Type", "application/json")
+	createW := httptest.NewRecorder()
+	srv.mux.ServeHTTP(createW, createReq)
+	if createW.Code != http.StatusCreated {
+		t.Fatalf("setup: create key failed with %d", createW.Code)
+	}
+
+	req := httptest.NewRequest("GET", "/api/admin/keys?vault=default", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	keys, ok := resp["keys"].([]interface{})
+	if !ok {
+		t.Fatal("expected 'keys' array in response")
+	}
+	if len(keys) != 1 {
+		t.Fatalf("expected 1 key, got %d", len(keys))
+	}
+}
+
+// TestRevokeAPIKey tests DELETE /api/admin/keys/{id}
+func TestRevokeAPIKey(t *testing.T) {
+	store := newTestAuthStore(t)
+	srv := newTestServer(t, store)
+
+	// Create a key
+	body, _ := json.Marshal(map[string]string{"vault": "default", "label": "to-revoke", "mode": "full"})
+	createReq := httptest.NewRequest("POST", "/api/admin/keys", bytes.NewReader(body))
+	createReq.Header.Set("Content-Type", "application/json")
+	createW := httptest.NewRecorder()
+	srv.mux.ServeHTTP(createW, createReq)
+	if createW.Code != http.StatusCreated {
+		t.Fatalf("setup: create key failed: %s", createW.Body.String())
+	}
+
+	var createResp map[string]interface{}
+	json.NewDecoder(createW.Body).Decode(&createResp)
+	keyMeta := createResp["key"].(map[string]interface{})
+	keyID := keyMeta["id"].(string)
+
+	req := httptest.NewRequest("DELETE", "/api/admin/keys/"+keyID+"?vault=default", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp["revoked"] != keyID {
+		t.Fatalf("expected revoked=%q, got %v", keyID, resp["revoked"])
+	}
+}
+
+// TestSetVaultConfig tests PUT /api/admin/vaults/config
+func TestSetVaultConfig(t *testing.T) {
+	store := newTestAuthStore(t)
+	srv := newTestServer(t, store)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"name":   "myvault",
+		"public": false,
+	})
+	req := httptest.NewRequest("PUT", "/api/admin/vaults/config", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp["name"] != "myvault" {
+		t.Fatalf("expected name=myvault, got %v", resp["name"])
+	}
+	if resp["public"] != false {
+		t.Fatalf("expected public=false, got %v", resp["public"])
+	}
+}
+
+// TestChangeAdminPassword tests PUT /api/admin/password
+func TestChangeAdminPasswordEndpoint(t *testing.T) {
+	store := newTestAuthStore(t)
+	srv := newTestServer(t, store)
+
+	// Seed a root admin
+	if err := store.CreateAdmin("root", "oldpass"); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	body, _ := json.Marshal(map[string]string{
+		"username":     "root",
+		"new_password": "newpass123",
+	})
+	req := httptest.NewRequest("PUT", "/api/admin/password", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Old password should no longer work
+	if err := store.ValidateAdmin("root", "oldpass"); err == nil {
+		t.Fatal("old password should be invalid after change")
+	}
+	// New password should work
+	if err := store.ValidateAdmin("root", "newpass123"); err != nil {
+		t.Fatalf("new password should validate: %v", err)
+	}
+}
+
+// TestMCPInfo tests GET /api/admin/mcp-info
+func TestMCPInfo(t *testing.T) {
+	store := newTestAuthStore(t)
+	srv := NewServer("localhost:0", &MockEngine{}, store, nil, nil, EmbedInfo{}, nil, "", MCPInfo{
+		Addr:     ":8750",
+		HasToken: true,
+	})
+
+	req := httptest.NewRequest("GET", "/api/admin/mcp-info", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp MCPInfoResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.URL != "http://localhost:8750/mcp" {
+		t.Errorf("unexpected URL: %q", resp.URL)
+	}
+	if !resp.TokenConfigured {
+		t.Error("expected token_configured=true")
+	}
+}
+
+// TestMCPInfo_NoToken verifies token_configured=false when no token.
+func TestMCPInfo_NoToken(t *testing.T) {
+	store := newTestAuthStore(t)
+	srv := NewServer("localhost:0", &MockEngine{}, store, nil, nil, EmbedInfo{}, nil, "", MCPInfo{
+		Addr:     ":8750",
+		HasToken: false,
+	})
+
+	req := httptest.NewRequest("GET", "/api/admin/mcp-info", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	var resp MCPInfoResponse
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp.TokenConfigured {
+		t.Error("expected token_configured=false when no token")
+	}
+}
+
+// TestMCPInfo_CustomPort verifies custom port is reflected in URL.
+func TestMCPInfo_CustomPort(t *testing.T) {
+	store := newTestAuthStore(t)
+	srv := NewServer("localhost:0", &MockEngine{}, store, nil, nil, EmbedInfo{}, nil, "", MCPInfo{
+		Addr:     ":9999",
+		HasToken: false,
+	})
+
+	req := httptest.NewRequest("GET", "/api/admin/mcp-info", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	var resp MCPInfoResponse
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp.URL != "http://localhost:9999/mcp" {
+		t.Errorf("unexpected URL for custom port: %q", resp.URL)
+	}
+}
+
+// TestChangeAdminPasswordEmptyRejected tests that empty new_password is rejected
+func TestChangeAdminPasswordEmptyRejected(t *testing.T) {
+	store := newTestAuthStore(t)
+	srv := newTestServer(t, store)
+
+	body, _ := json.Marshal(map[string]string{
+		"username":     "root",
+		"new_password": "",
+	})
+	req := httptest.NewRequest("PUT", "/api/admin/password", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for empty password, got %d", w.Code)
+	}
+}
+
+// TestHandlePlugins_NilRegistry verifies empty array returned when no registry.
+func TestHandlePlugins_NilRegistry(t *testing.T) {
+	store := newTestAuthStore(t)
+	srv := newTestServer(t, store)
+
+	req := httptest.NewRequest("GET", "/api/admin/plugins", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp []interface{}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp) != 0 {
+		t.Fatalf("expected empty array, got %d items", len(resp))
+	}
+}
+
+// TestHandlePlugins_EmptyRegistry verifies empty array returned for non-nil empty registry.
+func TestHandlePlugins_EmptyRegistry(t *testing.T) {
+	store := newTestAuthStore(t)
+	reg := plugin.NewRegistry()
+	srv := NewServer("localhost:0", &MockEngine{}, store, nil, nil, EmbedInfo{}, reg, "", MCPInfo{})
+
+	req := httptest.NewRequest("GET", "/api/admin/plugins", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp []interface{}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp) != 0 {
+		t.Fatalf("expected empty array for empty registry, got %d items", len(resp))
+	}
+}
+
+// newTestCoordinator creates a minimal ClusterCoordinator backed by an in-memory pebble DB.
+func newTestCoordinator(t *testing.T) *replication.ClusterCoordinator {
+	t.Helper()
+	db, err := pebble.Open("", &pebble.Options{FS: vfs.NewMem()})
+	if err != nil {
+		t.Fatalf("open pebble: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	repLog := replication.NewReplicationLog(db)
+	applier := replication.NewApplier(db)
+	epochStore, err := replication.NewEpochStore(db)
+	if err != nil {
+		t.Fatalf("new epoch store: %v", err)
+	}
+	cfg := &config.ClusterConfig{
+		Enabled:     true,
+		NodeID:      "test-node",
+		BindAddr:    "127.0.0.1:0",
+		Role:        "primary",
+		LeaseTTL:    10,
+		HeartbeatMS: 1000,
+	}
+	coord := replication.NewClusterCoordinator(cfg, repLog, applier, epochStore)
+	t.Cleanup(func() { coord.Stop() })
+	return coord
+}
+
+// TestReplicationStatus_ClusterDisabled verifies {"enabled":false} when no coordinator.
+func TestReplicationStatus_ClusterDisabled(t *testing.T) {
+	srv := newTestServer(t, nil)
+
+	req := httptest.NewRequest("GET", "/v1/replication/status", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if enabled, _ := resp["enabled"].(bool); enabled {
+		t.Fatal("expected enabled=false when cluster disabled")
+	}
+}
+
+// TestReplicationStatus_WithCoordinator verifies real data is returned.
+func TestReplicationStatus_WithCoordinator(t *testing.T) {
+	srv := newTestServer(t, nil)
+	coord := newTestCoordinator(t)
+	srv.SetCoordinator(coord)
+
+	req := httptest.NewRequest("GET", "/v1/replication/status", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if enabled, _ := resp["enabled"].(bool); !enabled {
+		t.Fatal("expected enabled=true when coordinator set")
+	}
+	if _, ok := resp["role"]; !ok {
+		t.Error("expected role field in response")
+	}
+	if _, ok := resp["epoch"]; !ok {
+		t.Error("expected epoch field in response")
+	}
+	if _, ok := resp["node_id"]; !ok {
+		t.Error("expected node_id field in response")
+	}
+}
+
+// TestReplicationLag_ClusterDisabled verifies 503 when no coordinator.
+func TestReplicationLag_ClusterDisabled(t *testing.T) {
+	srv := newTestServer(t, nil)
+
+	req := httptest.NewRequest("GET", "/v1/replication/lag", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestReplicationLag_WithCoordinator verifies lag data is returned.
+func TestReplicationLag_WithCoordinator(t *testing.T) {
+	srv := newTestServer(t, nil)
+	coord := newTestCoordinator(t)
+	srv.SetCoordinator(coord)
+
+	req := httptest.NewRequest("GET", "/v1/replication/lag", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, ok := resp["lag"]; !ok {
+		t.Error("expected lag field in response")
+	}
+	if _, ok := resp["role"]; !ok {
+		t.Error("expected role field in response")
+	}
+}
+
+// TestReplicationPromote_ClusterDisabled verifies 503 when no coordinator.
+func TestReplicationPromote_ClusterDisabled(t *testing.T) {
+	srv := newTestServer(t, nil)
+
+	req := httptest.NewRequest("POST", "/v1/replication/promote", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestReplicationPromote_WithCoordinator verifies election is triggered.
+func TestReplicationPromote_WithCoordinator(t *testing.T) {
+	srv := newTestServer(t, nil)
+	coord := newTestCoordinator(t)
+	srv.SetCoordinator(coord)
+
+	req := httptest.NewRequest("POST", "/v1/replication/promote", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	// Single-node cluster wins immediately — triggered=true
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if triggered, _ := resp["triggered"].(bool); !triggered {
+		t.Error("expected triggered=true in response")
+	}
+}

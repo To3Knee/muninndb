@@ -1,0 +1,133 @@
+package scoring
+
+import (
+	"context"
+	"encoding/json"
+	"log/slog"
+	"sync"
+	"time"
+
+	"github.com/cockroachdb/pebble"
+	"github.com/scrypster/muninndb/internal/storage/keys"
+)
+
+// Store persists VaultWeights to Pebble using the 0x18 key prefix.
+type Store struct {
+	db *pebble.DB
+	mu sync.RWMutex
+	// in-memory cache: avoid Pebble round-trip on every scoring call
+	cache map[[8]byte]*VaultWeights
+	// Track last update time per engram to throttle RecordFeedback
+	lastUpdate map[[24]byte]time.Time // key: vault_prefix(8) + engram_id(16)
+}
+
+// NewStore creates a new scoring weight store.
+func NewStore(db *pebble.DB) *Store {
+	return &Store{
+		db:         db,
+		cache:      make(map[[8]byte]*VaultWeights),
+		lastUpdate: make(map[[24]byte]time.Time),
+	}
+}
+
+// Get returns weights for a vault prefix. Returns DefaultWeights if not found.
+func (s *Store) Get(ctx context.Context, ws [8]byte) (*VaultWeights, error) {
+	s.mu.RLock()
+	if cached, ok := s.cache[ws]; ok {
+		s.mu.RUnlock()
+		return cached, nil
+	}
+	s.mu.RUnlock()
+
+	key := keys.VaultWeightsKey(ws)
+	val, closer, err := s.db.Get(key)
+	if err != nil {
+		if err == pebble.ErrNotFound {
+			// Return default weights
+			s.mu.Lock()
+			vw := &VaultWeights{
+				VaultPrefix:  ws,
+				Weights:      DefaultWeights(),
+				LearningRate: 0.1,
+				UpdatedAt:    time.Now(),
+			}
+			s.cache[ws] = vw
+			s.mu.Unlock()
+			return vw, nil
+		}
+		return nil, err
+	}
+	defer closer.Close()
+
+	var vw VaultWeights
+	if err := json.Unmarshal(val, &vw); err != nil {
+		return nil, err
+	}
+
+	s.mu.Lock()
+	s.cache[ws] = &vw
+	s.mu.Unlock()
+
+	return &vw, nil
+}
+
+// Save persists weights to Pebble.
+func (s *Store) Save(ctx context.Context, vw *VaultWeights) error {
+	data, err := json.Marshal(vw)
+	if err != nil {
+		return err
+	}
+
+	key := keys.VaultWeightsKey(vw.VaultPrefix)
+	if err := s.db.Set(key, data, pebble.NoSync); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	s.cache[vw.VaultPrefix] = vw
+	s.mu.Unlock()
+
+	return nil
+}
+
+// RecordFeedback applies a feedback signal to the vault's weights and saves.
+// Enforces max update frequency: skips if last update was < 30 minutes ago for this engram.
+// Uses a best-effort approach — errors are logged but not returned.
+func (s *Store) RecordFeedback(ctx context.Context, ws [8]byte, signal FeedbackSignal) {
+	// Build tracking key: vault_prefix(8) + engram_id(16)
+	var trackKey [24]byte
+	copy(trackKey[:8], ws[:])
+	copy(trackKey[8:24], signal.EngramID[:])
+
+	s.mu.Lock()
+	lastUpdate, ok := s.lastUpdate[trackKey]
+	now := signal.Timestamp
+	if ok && now.Sub(lastUpdate) < 30*time.Minute {
+		s.mu.Unlock()
+		return // throttle: skip this update
+	}
+	s.lastUpdate[trackKey] = now
+	s.mu.Unlock()
+
+	// Retrieve current weights (async best-effort)
+	vw, err := s.Get(ctx, ws)
+	if err != nil {
+		return // best effort
+	}
+
+	// Apply feedback update
+	vw.Update(signal)
+
+	// Persist (async best-effort)
+	if err := s.Save(ctx, vw); err != nil {
+		slog.Warn("failed to persist feedback", "err", err)
+	}
+}
+
+// InvalidateCache clears all cached weights (useful for testing or cache invalidation).
+func (s *Store) InvalidateCache() {
+	s.mu.Lock()
+	s.cache = make(map[[8]byte]*VaultWeights)
+	s.lastUpdate = make(map[[24]byte]time.Time)
+	s.mu.Unlock()
+}

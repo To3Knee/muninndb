@@ -1,0 +1,62 @@
+package plugin
+
+import "context"
+
+// PluginStore is the storage interface the plugin system needs.
+// A subset of EngineStore — plugins never see the full store surface.
+type PluginStore interface {
+	// CountWithoutFlag returns the number of engrams missing the given digest flag.
+	// Used by RetroactiveProcessor to calculate total work.
+	CountWithoutFlag(ctx context.Context, flag uint8) (int64, error)
+
+	// ScanWithoutFlag returns an iterator over engrams missing the given digest flag.
+	// Iterates in ULID order (oldest first). Must be resumable: if the server
+	// restarts, calling ScanWithoutFlag again yields only unprocessed engrams.
+	ScanWithoutFlag(ctx context.Context, flag uint8) EngramIterator
+
+	// SetDigestFlag sets a digest flag bit on an engram's metadata.
+	// Atomic: uses Pebble Merge to set the bit without read-modify-write.
+	SetDigestFlag(ctx context.Context, id ULID, flag uint8) error
+
+	// GetDigestFlags returns the current digest flags byte for an engram.
+	GetDigestFlags(ctx context.Context, id ULID) (uint8, error)
+
+	// UpdateEmbedding stores an embedding vector for an engram.
+	// Also updates the EmbedDim field in ERF metadata.
+	UpdateEmbedding(ctx context.Context, id ULID, vec []float32) error
+
+	// UpdateDigest updates the digest fields (summary, key_points, memory_type,
+	// classification) on an existing engram. Called by the enrich plugin.
+	UpdateDigest(ctx context.Context, id ULID, result *EnrichmentResult) error
+
+	// UpsertEntity creates or updates a lightweight entity record.
+	// Entities live in their own key namespace (0x0F | hash(name)).
+	UpsertEntity(ctx context.Context, entity ExtractedEntity) error
+
+	// LinkEngramToEntity creates an association between an engram and an entity.
+	LinkEngramToEntity(ctx context.Context, engramID ULID, entityName string) error
+
+	// UpsertRelationship stores a typed relationship in the association graph.
+	// Maps to the standard 0x03/0x04 forward/reverse association keys.
+	UpsertRelationship(ctx context.Context, engramID ULID, rel ExtractedRelation) error
+
+	// HNSWInsert inserts a vector into the HNSW index.
+	HNSWInsert(ctx context.Context, id ULID, vec []float32) error
+
+	// AutoLinkByEmbedding finds the top-K nearest neighbors by embedding and
+	// creates RELATES_TO associations with weight = similarity * 0.8.
+	// K = 5 (hardcoded, matching the design doc).
+	AutoLinkByEmbedding(ctx context.Context, id ULID, vec []float32) error
+}
+
+// EngramIterator is a forward-only iterator over engrams.
+type EngramIterator interface {
+	// Next advances to the next engram. Returns false when exhausted.
+	Next() bool
+
+	// Engram returns the current engram. Only valid after Next() returns true.
+	Engram() *Engram
+
+	// Close releases the underlying Pebble iterator.
+	Close() error
+}

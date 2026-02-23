@@ -1,0 +1,62 @@
+name: Publish Python SDK to PyPI
+
+# Triggers on a GitHub Release (tag v*) OR manually from the Actions tab.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (build but don't upload)"
+        required: false
+        default: "false"
+
+jobs:
+  publish:
+    name: Build & publish muninn-python + muninndb
+    runs-on: ubuntu-latest
+
+    # Required for PyPI trusted publisher (OIDC) — no API key needed.
+    # Set up the trusted publisher at: https://pypi.org/manage/account/publishing/
+    permissions:
+      id-token: write
+      contents: read
+
+    environment:
+      name: pypi
+      url: https://pypi.org/p/muninn-python
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build tools
+        run: pip install build
+
+      - name: Build muninn-python
+        working-directory: sdk/python
+        run: python -m build
+
+      - name: Build muninndb (alias stub)
+        working-directory: sdk/muninndb
+        run: python -m build
+
+      - name: Collect all artifacts
+        run: |
+          mkdir -p dist-all
+          cp sdk/python/dist/* dist-all/
+          cp sdk/muninndb/dist/* dist-all/
+          ls -lh dist-all/
+
+      - name: Publish to PyPI
+        if: github.event_name == 'release' || github.event.inputs.dry_run == 'false'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist-all/
+
+      - name: Dry run — skip upload
+        if: github.event.inputs.dry_run == 'true'
+        run: echo "Dry run complete. Packages built but not uploaded."

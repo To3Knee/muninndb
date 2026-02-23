@@ -1,0 +1,268 @@
+package mbp
+
+// Local stub types that will be implemented/provided by the engine later.
+// These are minimal definitions to allow the transport layer to compile independently.
+
+// ULID is a 16-byte identifier
+type ULID [16]byte
+
+// LifecycleState represents the state of an engram
+type LifecycleState uint8
+
+// RelType is the relationship type between engrams
+type RelType uint16
+
+// Association represents a directed link between two engrams
+type Association struct {
+	TargetID      string
+	RelType       uint16
+	Weight        float32
+	Confidence    float32
+	CreatedAt     int64
+	LastActivated int32
+}
+
+// HelloRequest is the HELLO handshake payload.
+type HelloRequest struct {
+	Version        string   `msgpack:"version"`
+	AuthMethod     string   `msgpack:"auth_method"`
+	Token          string   `msgpack:"token,omitempty"`
+	Vault          string   `msgpack:"vault,omitempty"`
+	Client         string   `msgpack:"client,omitempty"`
+	Capabilities   []string `msgpack:"capabilities,omitempty"`
+}
+
+// HelloResponse is the HELLO_OK response payload.
+type HelloResponse struct {
+	ServerVersion string   `msgpack:"server_version"`
+	SessionID     string   `msgpack:"session_id"`
+	VaultID       string   `msgpack:"vault_id"`
+	Capabilities  []string `msgpack:"capabilities"`
+	Limits        Limits   `msgpack:"limits"`
+}
+
+// Limits defines the server's operational constraints.
+type Limits struct {
+	MaxResults    int `msgpack:"max_results"`
+	MaxHopDepth   int `msgpack:"max_hop_depth"`
+	MaxRate       int `msgpack:"max_rate"`
+	MaxPayloadMB  int `msgpack:"max_payload_mb"`
+}
+
+// WriteRequest stores a new engram.
+type WriteRequest struct {
+	Concept        string          `msgpack:"concept"`
+	Content        string          `msgpack:"content"`
+	Tags           []string        `msgpack:"tags,omitempty"`
+	Confidence     float32         `msgpack:"confidence,omitempty"`
+	Stability      float32         `msgpack:"stability,omitempty"`
+	Associations   []Association   `msgpack:"associations,omitempty"`
+	Embedding      []float32       `msgpack:"embedding,omitempty"`
+	Vault          string          `msgpack:"vault,omitempty"`
+	IdempotentID   string          `msgpack:"idempotent_id,omitempty"`
+}
+
+// WriteResponse confirms a write and returns the assigned ULID.
+type WriteResponse struct {
+	ID        string `msgpack:"id"`
+	CreatedAt int64  `msgpack:"created_at"`
+}
+
+// ReadRequest retrieves an engram by ID.
+type ReadRequest struct {
+	ID    string `msgpack:"id"`
+	Vault string `msgpack:"vault,omitempty"`
+}
+
+// ReadResponse returns the full engram data.
+type ReadResponse struct {
+	ID             string        `msgpack:"id"`
+	Concept        string        `msgpack:"concept"`
+	Content        string        `msgpack:"content"`
+	Confidence     float32       `msgpack:"confidence"`
+	Relevance      float32       `msgpack:"relevance"`
+	Stability      float32       `msgpack:"stability"`
+	AccessCount    uint32        `msgpack:"access_count"`
+	Tags           []string      `msgpack:"tags,omitempty"`
+	State          uint8         `msgpack:"state"`
+	CreatedAt      int64         `msgpack:"created_at"`
+	UpdatedAt      int64         `msgpack:"updated_at"`
+	LastAccess     int64         `msgpack:"last_access"`
+	Summary        string        `msgpack:"summary,omitempty"`
+	KeyPoints      []string      `msgpack:"key_points,omitempty"`
+	MemoryType     uint8         `msgpack:"memory_type,omitempty"`
+	Classification uint16        `msgpack:"classification,omitempty"`
+}
+
+// ActivateRequest queries for relevant engrams.
+type ActivateRequest struct {
+	Context      []string      `msgpack:"context"`
+	Threshold    float32       `msgpack:"threshold,omitempty"`
+	MaxResults   int           `msgpack:"max_results,omitempty"`
+	MaxHops      int           `msgpack:"max_hops,omitempty"`
+	IncludeWhy   bool          `msgpack:"include_why,omitempty"`
+	Weights      *Weights      `msgpack:"weights,omitempty"`
+	Filters      []Filter      `msgpack:"filters,omitempty"`
+	Vault        string        `msgpack:"vault,omitempty"`
+	Embedding    []float32     `msgpack:"embedding,omitempty"`
+	BriefMode    string        `msgpack:"brief_mode,omitempty"` // "extractive"|"llm"|"auto"|"" (default: "auto")
+	DisableHops  bool          `msgpack:"disable_hops,omitempty"` // when true, override default hop traversal to 0
+	Profile      string        `json:"profile,omitempty" msgpack:"profile,omitempty"` // traversal profile override: ""|"default"|"causal"|"confirmatory"|"adversarial"|"structural"
+}
+
+// Weights defines scoring weight distribution.
+type Weights struct {
+	SemanticSimilarity float32 `msgpack:"semantic_similarity"`
+	FullTextRelevance  float32 `msgpack:"full_text_relevance"`
+	DecayFactor        float32 `msgpack:"decay_factor"`
+	HebbianBoost       float32 `msgpack:"hebbian_boost"`
+	AccessFrequency    float32 `msgpack:"access_frequency"`
+	Recency            float32 `msgpack:"recency"`
+}
+
+// Filter restricts activation results.
+type Filter struct {
+	Field string      `msgpack:"field"`
+	Op    string      `msgpack:"op"`
+	Value interface{} `msgpack:"value"`
+}
+
+// BriefSentence is a single sentence from the activation brief.
+type BriefSentence struct {
+	EngramID string  `msgpack:"engram_id" json:"engram_id"`
+	Text     string  `msgpack:"text"      json:"text"`
+	Score    float64 `msgpack:"score"     json:"score"`
+}
+
+// ActivateResponse returns activation results (may be multi-frame).
+type ActivateResponse struct {
+	QueryID     string            `msgpack:"query_id"`
+	TotalFound  int               `msgpack:"total_found"`
+	Activations []ActivationItem  `msgpack:"activations"`
+	LatencyMs   float64           `msgpack:"latency_ms,omitempty"`
+	Frame       int               `msgpack:"frame,omitempty"`
+	TotalFrames int               `msgpack:"total_frames,omitempty"`
+	Brief       []BriefSentence   `msgpack:"brief,omitempty" json:"brief,omitempty"` // extractive activation brief
+}
+
+// ActivationItem is a single activated engram.
+type ActivationItem struct {
+	ID              string              `msgpack:"id"`
+	Concept         string              `msgpack:"concept"`
+	Content         string              `msgpack:"content"`
+	Score           float32             `msgpack:"score"`
+	Confidence      float32             `msgpack:"confidence"`
+	ScoreComponents ScoreComponents     `msgpack:"score_components,omitempty"`
+	Why             string              `msgpack:"why,omitempty"`
+	HopPath         []string            `msgpack:"hop_path,omitempty"`
+	Dormant         bool                `msgpack:"dormant,omitempty"`
+}
+
+// ScoreComponents breaks down the activation score.
+type ScoreComponents struct {
+	SemanticSimilarity float32 `msgpack:"semantic_similarity"`
+	FullTextRelevance  float32 `msgpack:"full_text_relevance"`
+	DecayFactor        float32 `msgpack:"decay_factor"`
+	HebbianBoost       float32 `msgpack:"hebbian_boost"`
+	AccessFrequency    float32 `msgpack:"access_frequency"`
+	Recency            float32 `msgpack:"recency"`
+	Raw                float32 `msgpack:"raw"`
+	Final              float32 `msgpack:"final"`
+}
+
+// SubscribeRequest registers a context subscription.
+type SubscribeRequest struct {
+	SubscriptionID string  `msgpack:"subscription_id,omitempty"`
+	Context        []string `msgpack:"context"`
+	Threshold      float32 `msgpack:"threshold,omitempty"`
+	Vault          string   `msgpack:"vault,omitempty"`
+	TTL            int      `msgpack:"ttl,omitempty"`
+	RateLimit      int      `msgpack:"rate_limit,omitempty"`
+	PushOnWrite    bool     `msgpack:"push_on_write,omitempty"`
+	DeltaThreshold float32  `msgpack:"delta_threshold,omitempty"`
+}
+
+// SubscribeResponse confirms subscription creation.
+type SubscribeResponse struct {
+	SubID      string `msgpack:"sub_id"`
+	Status     string `msgpack:"status"`
+}
+
+// ActivationPush is an unsolicited server push.
+type ActivationPush struct {
+	SubscriptionID string          `msgpack:"subscription_id"`
+	Activation     ActivationItem  `msgpack:"activation"`
+	Trigger        string          `msgpack:"trigger"`
+	PushNumber     int             `msgpack:"push_number"`
+	At             int64           `msgpack:"at"`
+}
+
+// UnsubscribeRequest cancels a subscription.
+type UnsubscribeRequest struct {
+	SubID string `msgpack:"sub_id"`
+}
+
+// UnsubscribeResponse confirms unsubscription.
+type UnsubscribeResponse struct {
+	OK bool `msgpack:"ok"`
+}
+
+// LinkRequest creates/updates an association.
+type LinkRequest struct {
+	SourceID string  `msgpack:"source_id"`
+	TargetID string  `msgpack:"target_id"`
+	RelType  uint16  `msgpack:"rel_type"`
+	Weight   float32 `msgpack:"weight,omitempty"`
+	Vault    string  `msgpack:"vault,omitempty"`
+}
+
+// LinkResponse confirms association.
+type LinkResponse struct {
+	OK bool `msgpack:"ok"`
+}
+
+// ForgetRequest soft-deletes an engram.
+type ForgetRequest struct {
+	ID    string `msgpack:"id"`
+	Hard  bool   `msgpack:"hard,omitempty"`
+	Vault string `msgpack:"vault,omitempty"`
+}
+
+// ForgetResponse confirms deletion.
+type ForgetResponse struct {
+	OK bool `msgpack:"ok"`
+}
+
+// StatRequest queries database statistics.
+type StatRequest struct {
+	Vault string `msgpack:"vault,omitempty"`
+}
+
+// CoherenceResult holds coherence metrics for a single vault.
+type CoherenceResult struct {
+	Score                float64 `msgpack:"score"                 json:"score"`
+	OrphanRatio          float64 `msgpack:"orphan_ratio"          json:"orphan_ratio"`
+	ContradictionDensity float64 `msgpack:"contradiction_density" json:"contradiction_density"`
+	DuplicationPressure  float64 `msgpack:"duplication_pressure"  json:"duplication_pressure"`
+	DecayVariance        float64 `msgpack:"decay_variance"        json:"decay_variance"`
+	TotalEngrams         int64   `msgpack:"total_engrams"         json:"total_engrams"`
+}
+
+// StatResponse returns database stats.
+type StatResponse struct {
+	EngramCount    int64                      `msgpack:"engram_count"    json:"engramCount"`
+	VaultCount     int                        `msgpack:"vault_count"     json:"vaultCount"`
+	IndexSize      int64                      `msgpack:"index_size"      json:"indexSize"`
+	StorageBytes   int64                      `msgpack:"storage_bytes"   json:"storageBytes"`
+	CoherenceScores map[string]CoherenceResult `msgpack:"coherence,omitempty" json:"coherence,omitempty"`
+}
+
+// PingRequest is a keepalive probe.
+type PingRequest struct {
+	Data string `msgpack:"data,omitempty"`
+}
+
+// PongResponse is a keepalive response.
+type PongResponse struct {
+	Data string `msgpack:"data,omitempty"`
+}

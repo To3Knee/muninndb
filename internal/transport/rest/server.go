@@ -1,0 +1,799 @@
+package rest
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"strconv"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/scrypster/muninndb/internal/auth"
+	"github.com/scrypster/muninndb/internal/config"
+	"github.com/scrypster/muninndb/internal/engine/trigger"
+	"github.com/scrypster/muninndb/internal/plugin"
+	"github.com/scrypster/muninndb/internal/replication"
+	mbp "github.com/scrypster/muninndb/internal/transport/mbp"
+)
+
+// Server is an HTTP REST server for the MuninnDB engine.
+type Server struct {
+	addr          string
+	engine        EngineAPI
+	authStore     *auth.Store
+	sessionSecret []byte   // for admin session validation
+	corsOrigins   []string // allowed CORS origins; nil = no cross-origin allowed
+	mux           *http.ServeMux
+	server        *http.Server
+
+	// Embedder info — set at construction time, static for the lifetime of the server.
+	embedProvider string // "ollama", "openai", "voyage", or "none"
+	embedModel    string // model name, or "" if none
+
+	// MCP info — set at construction time for the /api/admin/mcp-info endpoint.
+	mcpAddr     string // MCP listen address, e.g. ":8750"
+	mcpHasToken bool   // whether a bearer token is configured
+
+	pluginRegistry *plugin.Registry
+
+	// dataDir is the server's data directory, used for reading/writing plugin_config.json.
+	dataDir string
+
+	// coordinatorFactory, when set, is called by enableClusterRuntime to create and
+	// start a coordinator from a persisted ClusterConfig. If nil, config is persisted
+	// but the coordinator is not started until the next process restart.
+	coordinatorFactory func(ctx context.Context, cfg config.ClusterConfig) (*replication.ClusterCoordinator, error)
+
+	// coordinator is the optional cluster coordinator; nil when cluster is disabled.
+	coordinator *replication.ClusterCoordinator
+
+	shutdown  chan struct{}
+	ready     chan struct{} // closed by Serve after wg.Add(1); guards against Shutdown racing wg.Wait
+	wg        sync.WaitGroup
+	shutdownM sync.Mutex
+}
+
+// EmbedInfo carries static embedder metadata set at server construction time.
+type EmbedInfo struct {
+	Provider string // "ollama", "openai", "voyage", or "none"
+	Model    string // model name, or ""
+}
+
+// MCPInfo carries static MCP server metadata set at server construction time.
+type MCPInfo struct {
+	Addr     string // MCP listen address, e.g. ":8750"
+	HasToken bool   // whether a bearer token is configured
+}
+
+// NewServer creates a new REST server.
+//
+// sessionSecret is used to validate admin session cookies on /api/admin/* routes.
+// corsOrigins is the set of allowed CORS origins; nil disables cross-origin access.
+func NewServer(addr string, engine EngineAPI, authStore *auth.Store, sessionSecret []byte, corsOrigins []string, embedInfo EmbedInfo, pluginRegistry *plugin.Registry, dataDir string, mcpInfo ...MCPInfo) *Server {
+	mux := http.NewServeMux()
+	s := &Server{
+		addr:           addr,
+		engine:         engine,
+		authStore:      authStore,
+		sessionSecret:  sessionSecret,
+		corsOrigins:    corsOrigins,
+		mux:            mux,
+		embedProvider:  embedInfo.Provider,
+		embedModel:     embedInfo.Model,
+		pluginRegistry: pluginRegistry,
+		dataDir:        dataDir,
+		shutdown:       make(chan struct{}),
+		ready:          make(chan struct{}),
+	}
+	if len(mcpInfo) > 0 {
+		s.mcpAddr = mcpInfo[0].Addr
+		s.mcpHasToken = mcpInfo[0].HasToken
+	}
+
+	// Replication routes — no auth required (internal cluster ops).
+	mux.HandleFunc("GET /v1/replication/status", s.withPublicMiddleware(s.handleReplicationStatus))
+	mux.HandleFunc("GET /v1/replication/lag", s.withPublicMiddleware(s.handleReplicationLag))
+	mux.HandleFunc("POST /v1/replication/promote", s.withPublicMiddleware(s.handleReplicationPromote))
+
+	// Cluster routes — no auth required (topology and health probes).
+	mux.HandleFunc("GET /v1/cluster/info", s.withPublicMiddleware(s.handleClusterInfo))
+	mux.HandleFunc("GET /v1/cluster/health", s.withPublicMiddleware(s.handleClusterHealth))
+	mux.HandleFunc("GET /v1/cluster/nodes", s.withPublicMiddleware(s.handleClusterNodes))
+	mux.HandleFunc("GET /v1/cluster/cognitive/consistency", s.withPublicMiddleware(s.handleCognitiveConsistency))
+
+	// Public routes — no auth, no body size limit (health/auth handshake).
+	mux.HandleFunc("POST /api/hello", s.withPublicMiddleware(s.handleHello))
+	mux.HandleFunc("GET /api/health", s.withPublicMiddleware(s.handleHealth))
+	mux.HandleFunc("GET /api/ready", s.withPublicMiddleware(s.handleReady))
+	mux.HandleFunc("GET /api/workers", s.withPublicMiddleware(s.handleWorkerStats))
+
+	// Authenticated vault routes — require Bearer API key.
+	mux.HandleFunc("POST /api/engrams", s.withMiddleware(s.handleCreateEngram))
+	mux.HandleFunc("GET /api/engrams/{id}", s.withMiddleware(s.handleGetEngram))
+	mux.HandleFunc("DELETE /api/engrams/{id}", s.withMiddleware(s.handleDeleteEngram))
+	mux.HandleFunc("POST /api/activate", s.withMiddleware(s.handleActivate))
+	mux.HandleFunc("POST /api/link", s.withMiddleware(s.handleLink))
+	mux.HandleFunc("GET /api/stats", s.withMiddleware(s.handleStats))
+	mux.HandleFunc("GET /api/engrams", s.withMiddleware(s.handleListEngrams))
+	mux.HandleFunc("GET /api/engrams/{id}/links", s.withMiddleware(s.handleGetEngramLinks))
+	mux.HandleFunc("GET /api/vaults", s.withMiddleware(s.handleListVaults))
+	mux.HandleFunc("GET /api/session", s.withMiddleware(s.handleGetSession))
+	// SSE subscribe — long-lived; bypasses write timeout via ResponseController.
+	mux.HandleFunc("GET /api/subscribe", s.withMiddleware(s.handleSubscribe))
+
+	// Admin routes — require valid admin session cookie, return JSON 401 on failure.
+	mux.HandleFunc("POST /api/admin/keys", s.withAdminMiddleware(s.handleCreateAPIKey(authStore)))
+	mux.HandleFunc("GET /api/admin/keys", s.withAdminMiddleware(s.handleListAPIKeys(authStore)))
+	mux.HandleFunc("DELETE /api/admin/keys/{id}", s.withAdminMiddleware(s.handleRevokeAPIKey(authStore)))
+	mux.HandleFunc("PUT /api/admin/vaults/config", s.withAdminMiddleware(s.handleSetVaultConfig(authStore)))
+	mux.HandleFunc("PUT /api/admin/password", s.withAdminMiddleware(s.handleChangeAdminPassword(authStore)))
+	mux.HandleFunc("GET /api/admin/embed/status", s.withAdminMiddleware(s.handleEmbedStatus))
+	mux.HandleFunc("GET /api/admin/mcp-info", s.withAdminMiddleware(s.handleMCPInfo))
+	mux.HandleFunc("GET /api/admin/plugins", s.withAdminMiddleware(s.handlePlugins))
+	mux.HandleFunc("GET /api/admin/vault/{name}/plasticity", s.withAdminMiddleware(s.handleGetVaultPlasticity(authStore)))
+	mux.HandleFunc("PUT /api/admin/vault/{name}/plasticity", s.withAdminMiddleware(s.handlePutVaultPlasticity(authStore)))
+	mux.HandleFunc("GET /api/admin/plugin-config", s.withAdminMiddleware(s.handleGetPluginConfig))
+	mux.HandleFunc("PUT /api/admin/plugin-config", s.withAdminMiddleware(s.handlePutPluginConfig))
+	mux.HandleFunc("DELETE /api/admin/vaults/{name}", s.withAdminMiddleware(s.handleDeleteVault))
+	mux.HandleFunc("POST /api/admin/vaults/{name}/clear", s.withAdminMiddleware(s.handleClearVault))
+	mux.HandleFunc("POST /api/admin/vaults/{name}/clone", s.withAdminMiddleware(s.handleCloneVault))
+	mux.HandleFunc("POST /api/admin/vaults/{name}/merge-into", s.withAdminMiddleware(s.handleMergeVault))
+	mux.HandleFunc("GET /api/admin/vaults/{name}/job-status", s.withAdminMiddleware(s.handleVaultJobStatus))
+
+	// Cluster management — session auth required
+	mux.HandleFunc("GET /api/admin/cluster/token", s.withAdminMiddleware(s.handleAdminClusterToken))
+	mux.HandleFunc("POST /api/admin/cluster/token/regenerate", s.withAdminMiddleware(s.handleAdminClusterRegenerateToken))
+	mux.HandleFunc("POST /api/admin/cluster/enable", s.withAdminMiddleware(s.handleAdminClusterEnable))
+	mux.HandleFunc("POST /api/admin/cluster/disable", s.withAdminMiddleware(s.handleAdminClusterDisable))
+	mux.HandleFunc("POST /api/admin/cluster/nodes", s.withAdminMiddleware(s.handleAdminClusterAddNode))
+	mux.HandleFunc("DELETE /api/admin/cluster/nodes/{id}", s.withAdminMiddleware(s.handleAdminClusterRemoveNode))
+	mux.HandleFunc("POST /api/admin/cluster/failover", s.withAdminMiddleware(s.handleAdminClusterFailover))
+	mux.HandleFunc("POST /api/admin/cluster/tls/rotate", s.withAdminMiddleware(s.handleAdminClusterRotateTLS))
+	mux.HandleFunc("PUT /api/admin/cluster/settings", s.withAdminMiddleware(s.handleAdminClusterSettings))
+	mux.HandleFunc("POST /api/admin/cluster/nodes/test", s.withAdminMiddleware(s.handleAdminClusterTestNode))
+	mux.HandleFunc("GET /api/admin/cluster/events", s.withAdminMiddleware(s.handleAdminClusterEvents))
+
+	s.server = &http.Server{
+		Addr:           addr,
+		Handler:        s.corsMiddleware(mux),
+		ReadTimeout:    15 * time.Second,
+		WriteTimeout:   15 * time.Second,
+		IdleTimeout:    60 * time.Second,
+		MaxHeaderBytes: 1 << 16, // 64 KB
+	}
+
+	return s
+}
+
+// Handler returns the HTTP handler for the REST API, so it can be mounted on another mux.
+func (s *Server) Handler() http.Handler {
+	return s.server.Handler
+}
+
+// SetCoordinator wires in the cluster coordinator. Pass nil to disable cluster endpoints.
+// Must be called before Serve.
+func (s *Server) SetCoordinator(coord *replication.ClusterCoordinator) {
+	s.coordinator = coord
+}
+
+// DisableCluster clears the active coordinator.
+// Safe to call when coordinator is nil (no-op).
+func (s *Server) DisableCluster() {
+	s.coordinator = nil
+}
+
+// ActiveCoordinator returns the current coordinator, or nil if cluster mode is off.
+func (s *Server) ActiveCoordinator() *replication.ClusterCoordinator {
+	return s.coordinator
+}
+
+// SetDataDir sets the data directory used for persisting cluster configuration.
+func (s *Server) SetDataDir(dir string) { s.dataDir = dir }
+
+// SetCoordinatorFactory wires in a factory function that creates and starts a
+// ClusterCoordinator from a ClusterConfig. Must be called before Serve.
+func (s *Server) SetCoordinatorFactory(f func(context.Context, config.ClusterConfig) (*replication.ClusterCoordinator, error)) {
+	s.coordinatorFactory = f
+}
+
+// enableClusterRuntime persists the config and, if a coordinatorFactory is wired,
+// starts the coordinator. For Phase 1, if no factory is present, config is persisted
+// and the server reports success (coordinator starts on next restart).
+func (s *Server) enableClusterRuntime(ctx context.Context, cfg config.ClusterConfig) error {
+	if s.dataDir != "" {
+		if err := config.SaveClusterConfig(s.dataDir, cfg); err != nil {
+			return fmt.Errorf("persist config: %w", err)
+		}
+	}
+	if s.coordinatorFactory != nil {
+		coord, err := s.coordinatorFactory(ctx, cfg)
+		if err != nil {
+			return err
+		}
+		s.SetCoordinator(coord)
+	}
+	return nil
+}
+
+// persistClusterDisabled writes Enabled=false to the cluster config file.
+func (s *Server) persistClusterDisabled() error {
+	if s.dataDir == "" {
+		return nil
+	}
+	existing, err := config.LoadClusterConfig(s.dataDir)
+	if err != nil {
+		existing = config.ClusterConfig{}
+	}
+	existing.Enabled = false
+	return config.SaveClusterConfig(s.dataDir, existing)
+}
+
+// applyAndPersistSettings merges settings into the cluster config file.
+func (s *Server) applyAndPersistSettings(req clusterSettingsRequest) error {
+	if s.dataDir == "" {
+		return nil
+	}
+	cfg, err := config.LoadClusterConfig(s.dataDir)
+	if err != nil {
+		return err
+	}
+	if req.HeartbeatMS != nil {
+		cfg.HeartbeatMS = *req.HeartbeatMS
+	}
+	return config.SaveClusterConfig(s.dataDir, cfg)
+}
+
+// Serve starts listening and blocks until context is cancelled or Shutdown is called.
+func (s *Server) Serve(ctx context.Context) error {
+	listener, err := net.Listen("tcp", s.addr)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", s.addr, err)
+	}
+
+	s.wg.Add(1)
+	close(s.ready) // signal that wg.Add(1) has run; Shutdown may now call wg.Wait safely
+	go func() {
+		defer s.wg.Done()
+		if err := s.server.Serve(listener); err != nil && err != http.ErrServerClosed {
+			slog.Error("server error", "error", err)
+		}
+	}()
+
+	// Wait for shutdown signal
+	<-s.shutdown
+
+	// Graceful shutdown
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s.server.Shutdown(shutdownCtx)
+	s.wg.Wait()
+
+	return nil
+}
+
+// Shutdown gracefully stops the server.
+func (s *Server) Shutdown(ctx context.Context) error {
+	s.shutdownM.Lock()
+	defer s.shutdownM.Unlock()
+
+	select {
+	case <-s.shutdown:
+		return nil // Already shut down
+	default:
+	}
+
+	close(s.shutdown)
+
+	// Wait for Serve to have called wg.Add(1) before we call wg.Wait; without this,
+	// a Shutdown that races with Serve startup would see a zero-count wg and return
+	// before the goroutine is even launched (DATA RACE on wg internals).
+	select {
+	case <-s.ready:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Middleware
+
+// withPublicMiddleware applies observability middleware only (no auth, no body limit).
+// Use for health checks, readiness probes, and the HELLO handshake.
+func (s *Server) withPublicMiddleware(handler http.HandlerFunc) http.HandlerFunc {
+	return s.recoveryMiddleware(s.requestIDMiddleware(s.loggingMiddleware(handler)))
+}
+
+// withMiddleware applies the full chain: observability + body size limit + vault auth.
+// All vault-scoped data routes use this.
+// If authStore is nil (e.g. in tests), vault auth is skipped.
+func (s *Server) withMiddleware(handler http.HandlerFunc) http.HandlerFunc {
+	if s.authStore == nil {
+		return s.withPublicMiddleware(s.bodySizeMiddleware(handler))
+	}
+	return s.withPublicMiddleware(s.bodySizeMiddleware(s.authStore.VaultAuthMiddleware(handler)))
+}
+
+// withAdminMiddleware applies observability + body size limit + admin session auth.
+// Returns JSON 401 (not a redirect) on auth failure — suitable for REST API callers.
+// If authStore is nil or sessionSecret is empty, admin auth is skipped (e.g. in tests).
+func (s *Server) withAdminMiddleware(handler http.HandlerFunc) http.HandlerFunc {
+	if s.authStore == nil || len(s.sessionSecret) == 0 {
+		return s.withPublicMiddleware(s.bodySizeMiddleware(handler))
+	}
+	return s.withPublicMiddleware(s.bodySizeMiddleware(s.authStore.AdminAPIMiddleware(s.sessionSecret, handler)))
+}
+
+// bodySizeMiddleware limits request bodies to 4 MB to prevent resource exhaustion.
+func (s *Server) bodySizeMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	const maxBody = 4 << 20 // 4 MB
+	return func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxBody)
+		next(w, r)
+	}
+}
+
+func (s *Server) recoveryMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if err := recover(); err != nil {
+				slog.Error("panic", "error", err, "path", r.URL.Path)
+				s.sendError(w, http.StatusInternalServerError, ErrInternal, "internal server error")
+			}
+		}()
+		next(w, r)
+	}
+}
+
+func (s *Server) requestIDMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		requestID := r.Header.Get("X-Request-ID")
+		if requestID == "" {
+			requestID = uuid.New().String()
+		}
+		r.Header.Set("X-Request-ID", requestID)
+		next(w, r)
+	}
+}
+
+func (s *Server) loggingMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		next(w, r)
+		elapsed := time.Since(start)
+		slog.Info("request", "method", r.Method, "path", r.URL.Path, "duration_ms", elapsed.Milliseconds())
+	}
+}
+
+// Handlers
+
+func (s *Server) handleHello(w http.ResponseWriter, r *http.Request) {
+	var req HelloRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "invalid request body")
+		return
+	}
+	resp, err := s.engine.Hello(r.Context(), &req)
+	if err != nil {
+		s.sendError(w, http.StatusUnauthorized, ErrAuthFailed, err.Error())
+		return
+	}
+	s.sendJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleCreateEngram(w http.ResponseWriter, r *http.Request) {
+	var req WriteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "invalid request body")
+		return
+	}
+	resp, err := s.engine.Write(r.Context(), &req)
+	if err != nil {
+		s.sendError(w, http.StatusInternalServerError, ErrStorageError, err.Error())
+		return
+	}
+	s.sendJSON(w, http.StatusCreated, resp)
+}
+
+func (s *Server) handleGetEngram(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "missing engram id")
+		return
+	}
+	resp, err := s.engine.Read(r.Context(), &ReadRequest{ID: id})
+	if err != nil {
+		s.sendError(w, http.StatusNotFound, ErrEngramNotFound, err.Error())
+		return
+	}
+	s.sendJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleDeleteEngram(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "missing engram id")
+		return
+	}
+	resp, err := s.engine.Forget(r.Context(), &ForgetRequest{ID: id})
+	if err != nil {
+		s.sendError(w, http.StatusInternalServerError, ErrStorageError, err.Error())
+		return
+	}
+	s.sendJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleActivate(w http.ResponseWriter, r *http.Request) {
+	var req ActivateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "invalid request body")
+		return
+	}
+	resp, err := s.engine.Activate(r.Context(), &req)
+	if err != nil {
+		s.sendError(w, http.StatusInternalServerError, ErrIndexError, err.Error())
+		return
+	}
+	s.sendJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleLink(w http.ResponseWriter, r *http.Request) {
+	var req LinkRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "invalid request body")
+		return
+	}
+	mbpReq := &mbp.LinkRequest{
+		SourceID: req.SourceID,
+		TargetID: req.TargetID,
+		RelType:  req.RelType,
+		Weight:   req.Weight,
+		Vault:    req.Vault,
+	}
+	resp, err := s.engine.Link(r.Context(), mbpReq)
+	if err != nil {
+		s.sendError(w, http.StatusInternalServerError, ErrInvalidAssociation, err.Error())
+		return
+	}
+	s.sendJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
+	resp, err := s.engine.Stat(r.Context(), &StatRequest{})
+	if err != nil {
+		s.sendError(w, http.StatusInternalServerError, ErrStorageError, err.Error())
+		return
+	}
+	s.sendJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleWorkerStats(w http.ResponseWriter, r *http.Request) {
+	stats := s.engine.WorkerStats()
+	s.sendJSON(w, http.StatusOK, stats)
+}
+
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(HealthResponse{Status: "ok"})
+}
+
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(ReadyResponse{Status: "ready"})
+}
+
+// Utility methods
+
+func (s *Server) sendJSON(w http.ResponseWriter, statusCode int, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	json.NewEncoder(w).Encode(data)
+}
+
+func (s *Server) sendError(w http.ResponseWriter, statusCode int, code ErrorCode, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+
+	displayMsg := message
+	if statusCode >= 500 {
+		slog.Error("rest: internal error", "code", code, "message", message, "status", statusCode)
+		displayMsg = "an internal error occurred"
+	}
+
+	json.NewEncoder(w).Encode(ErrorResponse{
+		Error: ErrorDetail{
+			Code:    code,
+			Message: displayMsg,
+		},
+	})
+}
+
+// corsMiddleware adds CORS headers when the request Origin is in s.corsOrigins.
+// If corsOrigins is empty, no cross-origin access is allowed (no ACAO header set).
+// OPTIONS preflight always returns 204 so browsers can probe the policy.
+func (s *Server) corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin != "" && len(s.corsOrigins) > 0 {
+			for _, allowed := range s.corsOrigins {
+				if origin == allowed {
+					w.Header().Set("Access-Control-Allow-Origin", origin)
+					w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+					w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Request-ID, X-Allow-Default")
+					w.Header().Set("Vary", "Origin")
+					break
+				}
+			}
+		}
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) handleListEngrams(w http.ResponseWriter, r *http.Request) {
+	vault := r.URL.Query().Get("vault")
+	if vault == "" {
+		vault = "default"
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	if offset < 0 {
+		offset = 0
+	}
+	resp, err := s.engine.ListEngrams(r.Context(), &ListEngramsRequest{Vault: vault, Limit: limit, Offset: offset})
+	if err != nil {
+		s.sendError(w, http.StatusInternalServerError, ErrStorageError, err.Error())
+		return
+	}
+	s.sendJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleGetEngramLinks(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "missing engram id")
+		return
+	}
+	vault := r.URL.Query().Get("vault")
+	if vault == "" {
+		vault = "default"
+	}
+	resp, err := s.engine.GetEngramLinks(r.Context(), &GetEngramLinksRequest{ID: id, Vault: vault})
+	if err != nil {
+		s.sendError(w, http.StatusInternalServerError, ErrStorageError, err.Error())
+		return
+	}
+	s.sendJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleListVaults(w http.ResponseWriter, r *http.Request) {
+	vaults, err := s.engine.ListVaults(r.Context())
+	if err != nil {
+		s.sendError(w, http.StatusInternalServerError, ErrStorageError, err.Error())
+		return
+	}
+	s.sendJSON(w, http.StatusOK, vaults)
+}
+
+func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
+	vault := r.URL.Query().Get("vault")
+	if vault == "" {
+		vault = "default"
+	}
+	sinceStr := r.URL.Query().Get("since")
+	since := time.Now().Add(-24 * time.Hour)
+	if sinceStr != "" {
+		if t, err := time.Parse(time.RFC3339, sinceStr); err == nil {
+			since = t
+		}
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 || limit > 500 {
+		limit = 50
+	}
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	if offset < 0 {
+		offset = 0
+	}
+	resp, err := s.engine.GetSession(r.Context(), &GetSessionRequest{Vault: vault, Since: since, Limit: limit, Offset: offset})
+	if err != nil {
+		s.sendError(w, http.StatusInternalServerError, ErrStorageError, err.Error())
+		return
+	}
+	s.sendJSON(w, http.StatusOK, resp)
+}
+
+// handleSubscribe opens a long-lived SSE connection. The client receives
+// ActivationPush events as JSON-encoded server-sent events.
+//
+// Delivery is best-effort: if the client reads too slowly, pushes are dropped
+// (the subscription stays alive). The connection sends a keepalive ping every
+// 30 seconds so reverse proxies do not close idle streams.
+//
+// Query params:
+//
+//	vault     — vault name (default: "default")
+//	context   — (repeatable) subscription context strings for semantic matching
+//	threshold — float32 score threshold, default 0.5
+//	on_write  — "true"|"1" to receive a push on every qualifying write
+//	ttl       — subscription TTL in seconds, 0 = no expiry
+//	rate      — max pushes/sec, default 10
+func (s *Server) handleSubscribe(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+
+	vault := q.Get("vault")
+	if vault == "" {
+		vault = "default"
+	}
+	contextStrs := q["context"]
+
+	threshold := float32(0.5)
+	if v := q.Get("threshold"); v != "" {
+		if f, err := strconv.ParseFloat(v, 32); err == nil {
+			threshold = float32(f)
+		}
+	}
+	if threshold < 0 || threshold > 1 {
+		threshold = 0.5
+	}
+	ttl := 0
+	if v := q.Get("ttl"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			ttl = i
+		}
+	}
+	if ttl < 0 {
+		ttl = 0
+	}
+	rateLimit := 10
+	if v := q.Get("rate"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			rateLimit = i
+		}
+	}
+	if rateLimit < 1 {
+		rateLimit = 1
+	} else if rateLimit > 1000 {
+		rateLimit = 1000
+	}
+	pushOnWrite := q.Get("on_write") == "true" || q.Get("on_write") == "1"
+
+	// Set SSE headers before any write to the body.
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no") // disable nginx buffering
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	// Clear the server write deadline so long-lived SSE streams are not killed
+	// by the REST server's 15-second WriteTimeout.
+	rc := http.NewResponseController(w)
+	_ = rc.SetWriteDeadline(time.Time{})
+
+	// Buffered channel for pushes. The deliver func is non-blocking: it drops
+	// pushes when the channel is full rather than blocking the trigger worker.
+	pushCh := make(chan *trigger.ActivationPush, 32)
+
+	// T6: local drop counter — tracks consecutive drops for this connection.
+	// We use a plain int64 because deliver and the SSE loop are sequential
+	// (deliver puts into pushCh; the SSE loop drains it), but deliver may be
+	// called from any goroutine, so we use an atomic for safety.
+	var consecutiveDrops int64
+
+	deliver := func(ctx context.Context, push *trigger.ActivationPush) error {
+		select {
+		case pushCh <- push:
+			// Successful delivery — reset consecutive drop counter.
+			atomic.StoreInt64(&consecutiveDrops, 0)
+		default:
+			// Client too slow — drop this push, keep subscription alive.
+			atomic.AddInt64(&consecutiveDrops, 1)
+		}
+		return nil
+	}
+
+	req := &mbp.SubscribeRequest{
+		Context:     contextStrs,
+		Threshold:   threshold,
+		Vault:       vault,
+		TTL:         ttl,
+		RateLimit:   rateLimit,
+		PushOnWrite: pushOnWrite,
+	}
+
+	subID, err := s.engine.SubscribeWithDeliver(r.Context(), req, deliver)
+	if err != nil {
+		// SSE headers have already been written (200 OK, text/event-stream), so
+		// we cannot change the status code. Send an SSE error event instead.
+		var errMsg string
+		if errors.Is(err, trigger.ErrVaultSubscriptionLimitReached) || errors.Is(err, trigger.ErrGlobalSubscriptionLimitReached) {
+			errMsg = "subscription limit reached"
+		} else {
+			errMsg = err.Error()
+		}
+		fmt.Fprintf(w, "event: error\ndata: {\"error\":%q}\n\n", errMsg)
+		flusher.Flush()
+		return
+	}
+	defer s.engine.Unsubscribe(context.Background(), subID)
+
+	// Confirm subscription to client.
+	fmt.Fprintf(w, "event: subscribed\ndata: {\"id\":%q}\n\n", subID)
+	flusher.Flush()
+
+	ping := time.NewTicker(30 * time.Second)
+	defer ping.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ping.C:
+			fmt.Fprintf(w, "event: ping\ndata: {}\n\n")
+			flusher.Flush()
+		case push, ok := <-pushCh:
+			if !ok {
+				return
+			}
+			// T6: Check whether the deliver func has been dropping pushes for this
+			// connection. If consecutiveDrops reached 50, the client is too slow and
+			// we terminate the stream so the worker goroutine isn't blocked indefinitely.
+			if atomic.LoadInt64(&consecutiveDrops) >= 50 {
+				slog.Warn("SSE: slow subscriber disconnected", "sub_id", subID,
+					"consecutive_drops", atomic.LoadInt64(&consecutiveDrops))
+				return
+			}
+			data, err := json.Marshal(map[string]interface{}{
+				"subscription_id": push.SubscriptionID,
+				"trigger":         string(push.Trigger),
+				"score":           push.Score,
+				"push_number":     push.PushNumber,
+				"at":              push.At.UnixNano(),
+				"engram": func() interface{} {
+					if push.Engram == nil {
+						return nil
+					}
+					return map[string]interface{}{
+						"id":      push.Engram.ID.String(),
+						"concept": push.Engram.Concept,
+						"content": push.Engram.Content,
+					}
+				}(),
+				"why": push.Why,
+			})
+			if err != nil {
+				continue
+			}
+			fmt.Fprintf(w, "event: push\ndata: %s\n\n", data)
+			flusher.Flush()
+		}
+	}
+}

@@ -1,0 +1,29 @@
+# Compiled binaries
+/muninn
+/muninndb
+/muninndb-server
+/bench
+/bench-test
+/eval
+/diag
+/muninndb-test
+
+# Embed assets — downloaded via `make fetch-assets`, not committed (too large)
+internal/plugin/embed/assets/*.dylib
+internal/plugin/embed/assets/*.so
+internal/plugin/embed/assets/*.onnx
+internal/plugin/embed/assets/tokenizer.json
+
+# Local data directories
+muninndb-data/
+/tmp/
+
+# macOS
+.DS_Store
+
+# Go test cache
+*.test
+*.out
+
+# Worktrees
+.worktrees/
