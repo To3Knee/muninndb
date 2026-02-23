@@ -6,9 +6,10 @@ import (
 	"os"
 )
 
-// Bootstrap ensures an admin user and session secret exist.
-// On first run, creates "root" with the default password "password" and prints a
-// reminder to change it. Subsequent runs are no-ops.
+// Bootstrap ensures an admin user, session secret, and default vault config exist.
+// On first run, creates "root" with the default password "password", sets the
+// "default" vault to public (no API key required), and prints a reminder to
+// change the password. Subsequent runs are no-ops.
 // secretPath is where the session signing secret is persisted (e.g. dataDir/auth_secret).
 func Bootstrap(store *Store, secretPath string) (secret []byte, err error) {
 	// Load or generate session secret
@@ -29,14 +30,25 @@ func Bootstrap(store *Store, secretPath string) (secret []byte, err error) {
 		if err = store.CreateAdmin("root", "password"); err != nil {
 			return nil, fmt.Errorf("create root admin: %w", err)
 		}
-		fmt.Println("┌─────────────────────────────────────────┐")
-		fmt.Println("│         MuninnDB — First Run Auth        │")
-		fmt.Println("│                                          │")
-		fmt.Println("│  Admin username: root                    │")
-		fmt.Println("│  Admin password: password                │")
-		fmt.Println("│                                          │")
-		fmt.Println("│  Change this password after first login. │")
-		fmt.Println("└─────────────────────────────────────────┘")
+
+		// Set the default vault to public so any MCP client can connect
+		// without needing an API key. Users can lock this down via the
+		// admin UI once they are ready.
+		if err = store.SetVaultConfig(VaultConfig{Name: "default", Public: true}); err != nil {
+			return nil, fmt.Errorf("configure default vault: %w", err)
+		}
+
+		fmt.Println("┌──────────────────────────────────────────────────┐")
+		fmt.Println("│            MuninnDB — First Run Setup             │")
+		fmt.Println("│                                                    │")
+		fmt.Println("│  Admin username : root                             │")
+		fmt.Println("│  Admin password : password                         │")
+		fmt.Println("│                                                    │")
+		fmt.Println("│  Default vault  : public (no API key required)     │")
+		fmt.Println("│                                                    │")
+		fmt.Println("│  Change your password and review vault settings    │")
+		fmt.Println("│  in the admin UI before exposing to a network.     │")
+		fmt.Println("└──────────────────────────────────────────────────┘")
 	}
 
 	return secret, nil

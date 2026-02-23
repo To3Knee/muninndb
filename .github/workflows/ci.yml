@@ -118,22 +118,6 @@ jobs:
 
           curl -sf http://localhost:8750/mcp/health
 
-      - name: Configure default vault as public
-        run: |
-          # Login with default credentials (root/password set on first run).
-          curl -sf -c /tmp/cookies.txt \
-            -X POST http://localhost:8476/api/auth/login \
-            -H "Content-Type: application/json" \
-            -d '{"username":"root","password":"password"}'
-
-          # Set the default vault to public so SDK tests can write without a token.
-          curl -sf -b /tmp/cookies.txt \
-            -X PUT http://localhost:8475/api/admin/vaults/config \
-            -H "Content-Type: application/json" \
-            -d '{"name":"default","public":true}'
-
-          echo "Default vault set to public."
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"

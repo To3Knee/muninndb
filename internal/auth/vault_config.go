@@ -15,9 +15,10 @@ import (
 // {Public: false}. This is a FAIL-CLOSED default: any vault that has never been
 // explicitly configured requires an API key for access.
 //
-// Operators must explicitly configure vaults via SetVaultConfig to allow public
-// (unauthenticated) access. A warning is logged on every access to an
-// unconfigured vault so that operators are alerted.
+// Bootstrap pre-configures the "default" vault as Public: true so that
+// first-time users can connect any MCP client without needing an API key.
+// Any additional vault created by an operator starts locked and must be
+// explicitly opened via SetVaultConfig.
 //
 // To allow unauthenticated access to a vault, explicitly set Public: true:
 //

@@ -46,7 +46,7 @@ Admin credentials authenticate to:
 
 ## Layer 2 — Vault API keys
 
-A vault is either **open** (no auth required) or **locked** (API key required, default). Unconfigured vaults default to fail-closed: they require an API key for any access. To allow unauthenticated access to a vault, explicitly configure it with `public: true` via SetVaultConfig.
+A vault is either **open** (no API key required) or **locked** (API key required). The built-in `default` vault ships **open** out of the box so that any MCP client can connect without configuration. Additional vaults you create start locked and must be explicitly opened.
 
 A vault can have multiple API keys — one per integration point. You might have:
 
@@ -141,15 +141,17 @@ Revocation is immediate. The token stops working on the next request.
 
 ### Vault access control
 
-Unconfigured vaults default to fail-closed and require an API key for all access. To allow unauthenticated (public) access:
+The `default` vault is created as **public** on first run — no API key required. Any additional vault you create starts locked (fail-closed) until you explicitly open it.
+
+To open a vault (allow unauthenticated access):
 
 ```bash
 curl -X PUT http://localhost:8475/api/admin/vaults/config \
   -H "Content-Type: application/json" \
-  -d '{"name":"default","public":true}'
+  -d '{"name":"myvault","public":true}'
 ```
 
-To require authentication (lock a vault):
+To lock a vault (require an API key):
 
 ```bash
 curl -X PUT http://localhost:8475/api/admin/vaults/config \
@@ -157,7 +159,7 @@ curl -X PUT http://localhost:8475/api/admin/vaults/config \
   -d '{"name":"default","public":false}'
 ```
 
-**Every unconfigured vault requires an API key.** You must explicitly opt in to public (unauthenticated) access via SetVaultConfig.
+**Any vault without an explicit config requires an API key.** Only the `default` vault is pre-configured as public by Bootstrap.
 
 ### Per-vault plasticity configuration
 
