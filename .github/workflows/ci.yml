@@ -125,9 +125,7 @@ jobs:
           cache-dependency-path: sdk/python/requirements.txt
 
       - name: Install Python dependencies
-        run: |
-          pip install -r sdk/python/requirements.txt
-          pip install langchain-core
+        run: pip install -r sdk/python/requirements.txt
 
       - name: Run SDK smoke test (write + activate)
         working-directory: sdk/python

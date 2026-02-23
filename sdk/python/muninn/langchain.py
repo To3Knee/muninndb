@@ -30,11 +30,15 @@ try:
 except ImportError:
     try:
         from langchain.memory import BaseMemory  # type: ignore[no-redef]
-    except ImportError as e:
-        raise ImportError(
-            "LangChain is required for MuninnDBMemory. "
-            "Install it with: pip install muninn-python[langchain]"
-        ) from e
+    except ImportError:
+        # LangChain is not installed. Use a Pydantic BaseModel stub so that
+        # MuninnDBMemory can be imported and used standalone (e.g. for
+        # activation-only workflows). Full LangChain chain integration requires:
+        #   pip install muninn-python[langchain]
+        try:
+            from pydantic import BaseModel as BaseMemory  # type: ignore[no-redef,assignment]
+        except ImportError:
+            BaseMemory = object  # type: ignore[assignment,misc]
 
 from .client import MuninnClient
 from .types import ActivationItem
