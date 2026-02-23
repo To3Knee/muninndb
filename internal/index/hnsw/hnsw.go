@@ -28,6 +28,7 @@ type ScoredID struct {
 // HNSWNode is an in-memory node in the HNSW graph.
 type HNSWNode struct {
 	id     [16]byte
+	vec    []float32    // in-memory vector cache; set once on Insert, never mutated
 	layers [][][16]byte // layers[l] = neighbor list at layer l
 	mu     sync.RWMutex
 }
@@ -146,10 +147,11 @@ func (idx *Index) Search(ctx context.Context, query []float32, k int) ([]ScoredI
 	}
 
 	ep := idx.entryPoint
-	epVec, err := idx.fetchVector(ep)
-	if err != nil || epVec == nil {
+	epNode := idx.nodes[ep]
+	if epNode == nil || len(epNode.vec) == 0 {
 		return nil, nil
 	}
+	epVec := epNode.vec
 	epDist := 1.0 - float64(CosineSimilarity(query, epVec))
 
 	// Phase 1: greedy descent through upper layers
@@ -162,11 +164,11 @@ func (idx *Index) Search(ctx context.Context, query []float32, k int) ([]ScoredI
 		for changed {
 			changed = false
 			for _, nID := range node.getLayer(l) {
-				nVec, err := idx.fetchVector(nID)
-				if err != nil || nVec == nil {
+				nNode := idx.nodes[nID]
+				if nNode == nil || len(nNode.vec) == 0 {
 					continue
 				}
-				nDist := 1.0 - float64(CosineSimilarity(query, nVec))
+				nDist := 1.0 - float64(CosineSimilarity(query, nNode.vec))
 				if nDist < epDist {
 					ep = nID
 					epDist = nDist
@@ -229,11 +231,11 @@ func (idx *Index) Search(ctx context.Context, query []float32, k int) ([]ScoredI
 			}
 			seen[nID] = true
 
-			nVec, err := idx.fetchVector(nID)
-			if err != nil || nVec == nil {
+			nNode := idx.nodes[nID]
+			if nNode == nil || len(nNode.vec) == 0 {
 				continue
 			}
-			nDist := 1.0 - float64(CosineSimilarity(query, nVec))
+			nDist := 1.0 - float64(CosineSimilarity(query, nNode.vec))
 
 			maxD := visited[0].dist
 			for _, v := range visited {
@@ -303,8 +305,11 @@ func (idx *Index) Insert(id [16]byte, vector []float32) {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
+	cachedVec := make([]float32, len(vector))
+	copy(cachedVec, vector)
 	node := &HNSWNode{
 		id:     id,
+		vec:    cachedVec,
 		layers: make([][][16]byte, level+1),
 	}
 	idx.nodes[id] = node
@@ -323,7 +328,10 @@ func (idx *Index) Insert(id [16]byte, vector []float32) {
 	}
 
 	ep := idx.entryPoint
-	epVec, _ := idx.fetchVectorNoLock(ep)
+	var epVec []float32
+	if epNode := idx.nodes[ep]; epNode != nil {
+		epVec = epNode.vec
+	}
 
 	// Phase 1: greedy descent from maxLevel to level+1 (only if epVec exists)
 	if epVec != nil {
@@ -387,15 +395,15 @@ func (idx *Index) greedyDescend(ep [16]byte, epVec, query []float32, l int, newE
 			break
 		}
 		for _, nID := range node.getLayer(l) {
-			nVec, _ := idx.fetchVectorNoLock(nID)
-			if nVec == nil {
+			nNode := idx.nodes[nID]
+			if nNode == nil || len(nNode.vec) == 0 {
 				continue
 			}
-			nDist := 1.0 - float64(CosineSimilarity(query, nVec))
+			nDist := 1.0 - float64(CosineSimilarity(query, nNode.vec))
 			if nDist < epDist {
 				ep = nID
 				epDist = nDist
-				epVec = nVec
+				epVec = nNode.vec
 				*newEP = ep
 				changed = true
 			}
@@ -405,11 +413,11 @@ func (idx *Index) greedyDescend(ep [16]byte, epVec, query []float32, l int, newE
 }
 
 func (idx *Index) searchLayer(ep [16]byte, query []float32, ef, l int) []candidate {
-	epVec, _ := idx.fetchVectorNoLock(ep)
-	if epVec == nil {
+	epNode := idx.nodes[ep]
+	if epNode == nil || len(epNode.vec) == 0 {
 		return nil
 	}
-	epDist := 1.0 - float64(CosineSimilarity(query, epVec))
+	epDist := 1.0 - float64(CosineSimilarity(query, epNode.vec))
 
 	candidates := []candidate{{ep, epDist}}
 	visited := []candidate{{ep, epDist}}
@@ -447,11 +455,11 @@ func (idx *Index) searchLayer(ep [16]byte, query []float32, ef, l int) []candida
 			}
 			seen[nID] = true
 
-			nVec, _ := idx.fetchVectorNoLock(nID)
-			if nVec == nil {
+			nNode := idx.nodes[nID]
+			if nNode == nil || len(nNode.vec) == 0 {
 				continue
 			}
-			nDist := 1.0 - float64(CosineSimilarity(query, nVec))
+			nDist := 1.0 - float64(CosineSimilarity(query, nNode.vec))
 
 			maxD := visited[0].dist
 			for _, v := range visited {
@@ -484,24 +492,6 @@ func (idx *Index) searchLayer(ep [16]byte, query []float32, ef, l int) []candida
 		}
 	}
 	return visited
-}
-
-// fetchVector loads a float32 vector from Pebble for the given engram ID.
-func (idx *Index) fetchVector(id [16]byte) ([]float32, error) {
-	// Vector is stored at the engram's embedding key
-	// For now we'll look up at the embedding offset. In practice the activation engine
-	// would pass the vector directly. We use a simplified approach here.
-	key := keys.HNSWNodeKey(idx.ws, id, 0xFF) // 0xFF = vector slot
-	val, closer, err := idx.db.Get(key)
-	if err != nil {
-		return nil, err
-	}
-	defer closer.Close()
-	return decodeVector(val), nil
-}
-
-func (idx *Index) fetchVectorNoLock(id [16]byte) ([]float32, error) {
-	return idx.fetchVector(id)
 }
 
 // StoreVector persists a vector to Pebble for later retrieval.
@@ -605,13 +595,19 @@ func (idx *Index) LoadFromPebble() error {
 		if len(key) < 26 {
 			continue
 		}
-		// Skip vector slots (layer 0xFF)
-		if key[25] == 0xFF {
-			continue
-		}
 
 		var id [16]byte
 		copy(id[:], key[9:25])
+
+		// Vector slot (0xFF): load into node.vec
+		if key[25] == 0xFF {
+			if _, ok := tempNodes[id]; !ok {
+				tempNodes[id] = &HNSWNode{id: id}
+			}
+			tempNodes[id].vec = decodeVector(iter.Value())
+			continue
+		}
+
 		layer := int(key[25])
 
 		if _, ok := tempNodes[id]; !ok {

@@ -737,6 +737,7 @@ func (e *Engine) Activate(ctx context.Context, req *mbp.ActivateRequest) (*mbp.A
 				decayItems[i] = cognitive.DecayCandidate{
 					WS:          wsPrefix,
 					ID:          scored.Engram.ID,
+					CreatedAt:   scored.Engram.CreatedAt,
 					LastAccess:  now,
 					AccessCount: scored.Engram.AccessCount,
 					Stability:   scored.Engram.Stability,
@@ -752,21 +753,11 @@ func (e *Engine) Activate(ctx context.Context, req *mbp.ActivateRequest) (*mbp.A
 		}
 	}
 
-	// Co-activation is evidence for confidence: each retrieved engram is more
-	// likely to be relevant. Submit confidence boosts (skipped in observe mode).
-	// Use SubmitBatch to reduce per-item channel contention under high concurrency.
-	if e.confidenceWorker != nil && len(result.Activations) > 0 && !auth.ObserveFromContext(ctx) {
-		confItems := make([]cognitive.ConfidenceUpdate, len(result.Activations))
-		for i, scored := range result.Activations {
-			confItems[i] = cognitive.ConfidenceUpdate{
-				WS:       wsPrefix,
-				EngramID: [16]byte(scored.Engram.ID),
-				Evidence: cognitive.EvidenceCoActivation,
-				Source:   "co_activation",
-			}
-		}
-		e.confidenceWorker.SubmitBatch(confItems)
-	}
+	// Note: co-activation is NOT fed to the confidence worker. Co-activation is
+	// evidence of relevance, not truth. Boosting confidence on every retrieval
+	// creates a feedback loop that inflates confidence for active engrams regardless
+	// of their actual reliability. Only user_confirmed/rejected and
+	// contradiction_detected drive Bayesian confidence updates.
 
 	// Forward collected Lobe side effects to the Cortex asynchronously.
 	// Only fires when workers are nil (Lobe mode) and coordinator is wired.
@@ -990,6 +981,7 @@ func (e *Engine) ActivateWithStructuredFilter(ctx context.Context, req *mbp.Acti
 				decayItems[i] = cognitive.DecayCandidate{
 					WS:          wsPrefix,
 					ID:          scored.Engram.ID,
+					CreatedAt:   scored.Engram.CreatedAt,
 					LastAccess:  now,
 					AccessCount: scored.Engram.AccessCount,
 					Stability:   scored.Engram.Stability,
@@ -1005,19 +997,7 @@ func (e *Engine) ActivateWithStructuredFilter(ctx context.Context, req *mbp.Acti
 		}
 	}
 
-	// Submit confidence updates (same logic as Activate)
-	if e.confidenceWorker != nil && len(result.Activations) > 0 && !auth.ObserveFromContext(ctx) {
-		confItems := make([]cognitive.ConfidenceUpdate, len(result.Activations))
-		for i, scored := range result.Activations {
-			confItems[i] = cognitive.ConfidenceUpdate{
-				WS:       wsPrefix,
-				EngramID: [16]byte(scored.Engram.ID),
-				Evidence: cognitive.EvidenceCoActivation,
-				Source:   "co_activation",
-			}
-		}
-		e.confidenceWorker.SubmitBatch(confItems)
-	}
+	// Co-activation confidence suppressed — see Activate() for rationale.
 
 	// Forward collected Lobe side effects (same logic as Activate)
 	if e.coordinator != nil && (len(lobeCoActivations) > 0 || len(lobeAccessedIDs) > 0) {

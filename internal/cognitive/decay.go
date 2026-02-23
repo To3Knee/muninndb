@@ -37,6 +37,7 @@ type DecayMeta struct {
 type DecayCandidate struct {
 	WS          [8]byte
 	ID          [16]byte
+	CreatedAt   time.Time // used to compute average spacing between accesses
 	LastAccess  time.Time
 	AccessCount uint32
 	Stability   float32
@@ -177,7 +178,21 @@ func (dw *DecayWorker) processBatch(ctx context.Context, batch []DecayCandidate)
 	for _, c := range batch {
 		daysSince := now.Sub(c.LastAccess).Hours() / 24.0
 		newRelevance := EbbinghausWithFloor(daysSince, float64(c.Stability), DefaultFloor)
-		newStability := ComputeStability(c.AccessCount, daysSince/float64(c.AccessCount+1))
+
+		// Average spacing = total lifespan / number of accesses.
+		// Using lifespan (now - CreatedAt) divided by AccessCount gives the true
+		// average interval between reviews, which drives the spacing-effect bonus.
+		// The old formula used daysSince/(AccessCount+1) — time since last access
+		// divided by count — which severely underestimated spacing for old engrams
+		// accessed recently but rarely (e.g., 1-day daysSince / 3 accesses = 0.33d
+		// instead of the correct 365d/3 = 121d for an engram created a year ago).
+		lifespanDays := now.Sub(c.CreatedAt).Hours() / 24.0
+		divisor := float64(c.AccessCount)
+		if divisor < 1 {
+			divisor = 1
+		}
+		avgSpacing := lifespanDays / divisor
+		newStability := ComputeStability(c.AccessCount, avgSpacing)
 
 		// Capture oldRelevance before the update (carried from the activation path).
 		oldRelevance := c.Relevance

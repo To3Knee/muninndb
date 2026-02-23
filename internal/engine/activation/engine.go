@@ -183,14 +183,16 @@ func New(store ActivationStore, fts FTSIndex, hnsw HNSWIndex, embedder Embedder)
 	// Redistribute that 0.35 budget to active components so the score
 	// range isn't compressed by 35% of dead weight.
 	if hnsw == nil {
-		// Distribute 0.35 proportionally to FTS (0.25), Decay (0.20), Recency (0.05) = 0.50 total
-		scale := float32(1.0 / 0.50)
+		// Redistribute the 0.35 semantic budget proportionally across all remaining
+		// active dimensions: FTS(0.25) + Decay(0.20) + Hebbian(0.10) + AccessFreq(0.05) + Recency(0.05) = 0.65
+		// This keeps weights summing to exactly 1.0 so raw scores stay in [0,1].
+		scale := float32(1.0 / 0.65)
 		w.SemanticSimilarity = 0
-		w.FullTextRelevance = 0.25 * scale  // → 0.50
-		w.DecayFactor = 0.20 * scale        // → 0.40
-		w.HebbianBoost = 0.10               // keep as-is; activates once history builds
-		w.AccessFrequency = 0.05 * scale    // → 0.10
-		w.Recency = 0.05 * scale            // → 0.10
+		w.FullTextRelevance = 0.25 * scale  // ≈ 0.385
+		w.DecayFactor = 0.20 * scale        // ≈ 0.308
+		w.HebbianBoost = 0.10 * scale       // ≈ 0.154
+		w.AccessFrequency = 0.05 * scale    // ≈ 0.077
+		w.Recency = 0.05 * scale            // ≈ 0.077
 	}
 	e := &ActivationEngine{
 		store:    store,
@@ -464,10 +466,9 @@ func phase3RRF(sets *candidateSets) []fusedCandidate {
 		c.vectorScore = s.Score
 	}
 
-	decayRankScore := 1.0 / (rrfK_Decay + float64(candidatesPerIndex+1))
-	for _, id := range sets.decay {
+	for rank, id := range sets.decay {
 		c := getOrCreate(id)
-		c.rrfScore += decayRankScore
+		c.rrfScore += 1.0 / (rrfK_Decay + float64(rank+1))
 		c.inDecayPool = true
 	}
 
