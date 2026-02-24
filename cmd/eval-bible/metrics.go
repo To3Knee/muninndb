@@ -44,6 +44,25 @@ func ndcgAtK(results []string, relevant map[string]bool, k int) float64 {
 	return dcg / idcg
 }
 
+// mrrAtK returns the reciprocal rank of the first target found in the top-k results.
+// MRR = 1/rank of first hit, or 0 if no target appears in top-k.
+func mrrAtK(results []string, targets []string, k int) float64 {
+	targetSet := make(map[string]bool, len(targets))
+	for _, t := range targets {
+		targetSet[t] = true
+	}
+	limit := k
+	if limit > len(results) {
+		limit = len(results)
+	}
+	for i := 0; i < limit; i++ {
+		if targetSet[results[i]] {
+			return 1.0 / float64(i+1)
+		}
+	}
+	return 0
+}
+
 // computeDCG computes Discounted Cumulative Gain for the top-k results.
 // DCG = sum over rank i (1-indexed) of: 1 / log2(i + 1) if result[i] is relevant.
 func computeDCG(results []string, relevant map[string]bool, k int) float64 {

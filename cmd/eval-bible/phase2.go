@@ -3,170 +3,209 @@ package main
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
 
-// thematicQuery is a query used to measure cognitive/thematic coherence.
-type thematicQuery struct {
-	Context string
-	Label   string
+// anchorResult captures per-query MRR scores for Sub-experiment A.
+type anchorResult struct {
+	Label    string
+	FreshMRR float64
+	StaleMRR float64
 }
 
-// thematicQueries is the fixed set of 10 thematic eval queries.
-var thematicQueries = []thematicQuery{
-	{Context: "forgiveness redemption grace mercy sins forgiven", Label: "forgiveness"},
-	{Context: "eternal life salvation believe faith Jesus saved", Label: "eternal life"},
-	{Context: "shepherd flock lost sheep pasture", Label: "shepherd"},
-	{Context: "resurrection from the dead raised third day", Label: "resurrection"},
-	{Context: "love one another neighbor commandment", Label: "love commandment"},
-	{Context: "bread of life feeding five thousand loaves fish", Label: "feeding miracle"},
-	{Context: "Holy Spirit Pentecost tongues fire descended", Label: "Holy Spirit"},
-	{Context: "faith without works dead Abraham justified", Label: "faith and works"},
-	{Context: "creation light darkness void earth heaven", Label: "creation"},
-	{Context: "wisdom understanding proverbs fear of the Lord", Label: "wisdom"},
-}
-
-// queryDelta captures the NDCG change for one thematic query across phases.
-type queryDelta struct {
-	Label        string
-	BaselineNDCG float64
-	PostReadNDCG float64
-	Delta        float64
+// pairResult captures per-pair rank data for Sub-experiment B.
+type pairResult struct {
+	OTVerse     string
+	NTVerse     string
+	Control     string
+	LinkedRank  int // rank of OT verse queried via NT verse name (1-indexed; k+1 = not found)
+	ControlRank int // rank of unlinked control OT verse under same query
+	Delta       int // ControlRank - LinkedRank; positive = Hebbian is lifting the linked verse
 }
 
 // Phase2Result captures the cognitive properties evaluation results.
 type Phase2Result struct {
-	BaselineNDCG    float64
-	PostReadingNDCG float64
-	PostDecayNDCG   float64
-	QueryDeltas     []queryDelta
+	// Sub-experiment A: decay bias (fresh NT > stale OT?)
+	FreshMRR   float64
+	StaleMRR   float64
+	DecayScore float64 // (FreshMRR - StaleMRR) / FreshMRR; positive = decay working
+
+	// Sub-experiment B: Hebbian lift (linked stale ranks higher than unlinked control?)
+	HebbianScore float64 // avg(ControlRank - LinkedRank); positive = Hebbian lifting stale verse
+
+	AnchorResults []anchorResult
+	PairResults   []pairResult
 }
 
-// RunPhase2 evaluates cognitive properties of the engine:
-//  1. Measure baseline NDCG for 10 thematic queries.
-//  2. Simulate reading: activate 200 John verses to build Hebbian associations.
-//  3. Wait 3 seconds for Hebbian worker to process.
-//  4. Re-measure NDCG on same thematic queries.
-//  5. Return results (PostDecayNDCG == PostReadingNDCG for v1).
-func RunPhase2(ctx context.Context, ee *evalEngine, gospelJohnTexts []string) Phase2Result {
-	fmt.Println("Phase 2: measuring baseline thematic NDCG...")
-	baselineNDCGs := measureThematicNDCGs(ctx, ee)
-	baselineAvg := avg64(baselineNDCGs)
-	fmt.Printf("  baseline avg NDCG: %.4f\n", baselineAvg)
+// hebbianControls maps each linked OT verse to an unlinked OT control with the same DaysAgo.
+// Controls verify that Hebbian links — not just thematic content — drive the rank lift.
+var hebbianControls = map[string]string{
+	"Genesis 1:1":  "Exodus 20:3",     // both DaysAgo=3650
+	"Isaiah 53:5":  "Jeremiah 29:11",  // both DaysAgo=2190
+	"Psalm 23:1":   "Psalm 23:4",      // both DaysAgo=90
+	"Genesis 3:15": "Deuteronomy 6:4", // both DaysAgo=3650
+	"Isaiah 7:14":  "Jeremiah 29:11",  // both DaysAgo=2190
+}
 
-	// Simulate reading: activate up to 200 John verses
-	limit := 200
-	if len(gospelJohnTexts) < limit {
-		limit = len(gospelJohnTexts)
-	}
-	fmt.Printf("Phase 2: activating %d John verses to build Hebbian associations...\n", limit)
-	for i, text := range gospelJohnTexts[:limit] {
-		_, _ = ee.activate(ctx, []string{text})
-		if (i+1)%50 == 0 {
-			fmt.Printf("  activated %d/%d John verses...\n", i+1, limit)
-		}
+// RunPhase2 evaluates cognitive properties using the curated fixture corpus.
+//
+// Process:
+//  1. Write all curated fixtures via the engine and install hand-set cognitive state.
+//  2. Co-activate each Hebbian pair to seed cross-testament associations.
+//  3. Wait for the Hebbian worker to process accumulated activations.
+//  4. Sub-experiment A: measure FreshMRR vs StaleMRR across 6 anchor queries.
+//  5. Sub-experiment B: compare linked-stale rank vs unlinked-control rank for 5 pairs.
+func RunPhase2(ctx context.Context, ee *evalEngine) Phase2Result {
+	const k = 10
+
+	fmt.Println("Phase 2: writing curated fixture corpus...")
+	if err := loadFixtures(ctx, ee); err != nil {
+		fmt.Printf("  WARNING: fixture load error: %v\n", err)
 	}
 
-	// Wait for Hebbian worker to process accumulated activations
-	fmt.Println("Phase 2: waiting 3s for Hebbian worker...")
+	fmt.Println("Phase 2: co-activating Hebbian pairs...")
+	for _, pair := range hebbianPairs {
+		_, _ = ee.activate(ctx, []string{pair[0], pair[1]})
+	}
+
+	fmt.Println("Phase 2: waiting 3s for Hebbian worker to process...")
 	time.Sleep(3 * time.Second)
 
-	fmt.Println("Phase 2: re-measuring thematic NDCG post-reading...")
-	postNDCGs := measureThematicNDCGs(ctx, ee)
-	postAvg := avg64(postNDCGs)
-	fmt.Printf("  post-reading avg NDCG: %.4f\n", postAvg)
-
-	deltas := make([]queryDelta, len(thematicQueries))
-	for i, q := range thematicQueries {
-		baseline := 0.0
-		if i < len(baselineNDCGs) {
-			baseline = baselineNDCGs[i]
-		}
-		post := 0.0
-		if i < len(postNDCGs) {
-			post = postNDCGs[i]
-		}
-		deltas[i] = queryDelta{
-			Label:        q.Label,
-			BaselineNDCG: baseline,
-			PostReadNDCG: post,
-			Delta:        post - baseline,
-		}
-	}
-
-	return Phase2Result{
-		BaselineNDCG:    baselineAvg,
-		PostReadingNDCG: postAvg,
-		// Skip genealogy decay for v1 — set PostDecayNDCG = PostReadingNDCG
-		PostDecayNDCG: postAvg,
-		QueryDeltas:   deltas,
-	}
-}
-
-// measureThematicNDCGs runs all 10 thematic queries and returns per-query NDCG scores
-// using keyword proximity as a proxy for relevance (no ground truth available).
-func measureThematicNDCGs(ctx context.Context, ee *evalEngine) []float64 {
-	scores := make([]float64, len(thematicQueries))
-	for i, q := range thematicQueries {
-		activations, err := ee.activate(ctx, []string{q.Context})
-		if err != nil || len(activations) == 0 {
-			scores[i] = 0
+	// Sub-experiment A: anchor queries — does FreshMRR > StaleMRR (decay is working)?
+	fmt.Println("Phase 2: Sub-experiment A — decay bias (FreshMRR vs StaleMRR)...")
+	anchorResults := make([]anchorResult, len(anchorQueries))
+	for i, q := range anchorQueries {
+		acts, err := ee.activate(ctx, []string{q.Context})
+		if err != nil || len(acts) == 0 {
+			anchorResults[i] = anchorResult{Label: q.Label}
 			continue
 		}
+		concepts := extractConcepts(acts)
+		anchorResults[i] = anchorResult{
+			Label:    q.Label,
+			FreshMRR: mrrAtK(concepts, q.FreshRefs, k),
+			StaleMRR: mrrAtK(concepts, q.StaleRefs, k),
+		}
+	}
 
-		// Proxy relevance: result is relevant if concept+content contains any query keyword > 3 chars
-		keywords := keywordsFromContext(q.Context)
-		relevant := make(map[string]bool, len(activations))
-		resultRefs := make([]string, len(activations))
-		for j, act := range activations {
-			resultRefs[j] = act.Concept
-			text := strings.ToLower(act.Concept + " " + act.Content)
-			for _, kw := range keywords {
-				if strings.Contains(text, kw) {
-					relevant[act.Concept] = true
-					break
-				}
+	avgFreshMRR := avgFieldMRR(anchorResults, true)
+	avgStaleMRR := avgFieldMRR(anchorResults, false)
+	decayScore := 0.0
+	if avgFreshMRR > 0 {
+		decayScore = (avgFreshMRR - avgStaleMRR) / avgFreshMRR
+	}
+	fmt.Printf("  avg FreshMRR=%.4f  StaleMRR=%.4f  decay_score=%.4f\n",
+		avgFreshMRR, avgStaleMRR, decayScore)
+
+	// Sub-experiment B: Hebbian lift — does linked stale OT verse rank higher than control?
+	fmt.Println("Phase 2: Sub-experiment B — Hebbian lift (linked vs control rank)...")
+	pairResults := make([]pairResult, len(hebbianPairs))
+	var totalDelta int
+	for i, pair := range hebbianPairs {
+		otVerse := pair[0]
+		ntVerse := pair[1]
+		control := hebbianControls[otVerse]
+
+		acts, err := ee.activate(ctx, []string{ntVerse})
+		if err != nil {
+			pairResults[i] = pairResult{OTVerse: otVerse, NTVerse: ntVerse, Control: control,
+				LinkedRank: k + 1, ControlRank: k + 1}
+			continue
+		}
+		concepts := extractConcepts(acts)
+		linkedRank := rankOf(concepts, otVerse, k)
+		controlRank := rankOf(concepts, control, k)
+		delta := controlRank - linkedRank
+
+		pairResults[i] = pairResult{
+			OTVerse:     otVerse,
+			NTVerse:     ntVerse,
+			Control:     control,
+			LinkedRank:  linkedRank,
+			ControlRank: controlRank,
+			Delta:       delta,
+		}
+		totalDelta += delta
+		fmt.Printf("  %-20s linked=%2d  control=%-20s rank=%2d  delta=%+d\n",
+			otVerse, linkedRank, control, controlRank, delta)
+	}
+	hebbianScore := 0.0
+	if len(hebbianPairs) > 0 {
+		hebbianScore = float64(totalDelta) / float64(len(hebbianPairs))
+	}
+	fmt.Printf("  avg Hebbian delta=%.2f (positive = linked ranks higher than control)\n", hebbianScore)
+
+	return Phase2Result{
+		FreshMRR:      avgFreshMRR,
+		StaleMRR:      avgStaleMRR,
+		DecayScore:    decayScore,
+		HebbianScore:  hebbianScore,
+		AnchorResults: anchorResults,
+		PairResults:   pairResults,
+	}
+}
+
+// loadFixtures writes all curated verses into the vault and sets their cognitive state.
+func loadFixtures(ctx context.Context, ee *evalEngine) error {
+	for _, group := range phase2Fixtures {
+		for _, fix := range group.Fixtures {
+			req := mbp.WriteRequest{
+				Concept: fix.Concept,
+				Content: fix.Content,
+				Tags:    fix.Tags,
+				Vault:   "bible",
+			}
+			if _, err := ee.writeVerse(ctx, req); err != nil {
+				return fmt.Errorf("write %q: %w", fix.Concept, err)
+			}
+			lastAccess := daysAgoToTime(fix.DaysAgo)
+			if err := ee.setEngramState(ctx, fix.Concept, lastAccess, fix.AccessCount, fix.Stability); err != nil {
+				// Log but don't abort — Phase 1 data may have already loaded these
+				fmt.Printf("  setEngramState %q: %v\n", fix.Concept, err)
 			}
 		}
-		scores[i] = ndcgAtK(resultRefs, relevant, 10)
 	}
-	return scores
+	return nil
 }
 
-// keywordsFromContext extracts words longer than 3 characters from a context string.
-func keywordsFromContext(context string) []string {
-	words := strings.Fields(strings.ToLower(context))
-	out := make([]string, 0, len(words))
-	for _, w := range words {
-		if len(w) > 3 {
-			out = append(out, w)
-		}
+// extractConcepts returns the Concept field from each activation item in order.
+func extractConcepts(acts []mbp.ActivationItem) []string {
+	out := make([]string, len(acts))
+	for i, a := range acts {
+		out[i] = a.Concept
 	}
 	return out
 }
 
-// filterJohnVerses returns the content texts of all "John X:Y" verses.
-func filterJohnVerses(reqs []mbp.WriteRequest) []string {
-	out := make([]string, 0, 879) // Gospel of John has ~879 verses
-	for _, r := range reqs {
-		if strings.HasPrefix(r.Concept, "John ") {
-			out = append(out, r.Content)
+// rankOf returns the 1-indexed rank of concept in results, or k+1 if not found.
+func rankOf(results []string, concept string, k int) int {
+	limit := k
+	if limit > len(results) {
+		limit = len(results)
+	}
+	for i := 0; i < limit; i++ {
+		if results[i] == concept {
+			return i + 1
 		}
 	}
-	return out
+	return k + 1
 }
 
-// avg64 returns the arithmetic mean of a float64 slice.
-func avg64(vals []float64) float64 {
-	if len(vals) == 0 {
+// avgFieldMRR computes the average FreshMRR (fresh=true) or StaleMRR (fresh=false)
+// across all anchor results.
+func avgFieldMRR(results []anchorResult, fresh bool) float64 {
+	if len(results) == 0 {
 		return 0
 	}
 	var sum float64
-	for _, v := range vals {
-		sum += v
+	for _, r := range results {
+		if fresh {
+			sum += r.FreshMRR
+		} else {
+			sum += r.StaleMRR
+		}
 	}
-	return sum / float64(len(vals))
+	return sum / float64(len(results))
 }

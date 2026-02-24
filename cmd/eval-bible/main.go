@@ -21,6 +21,8 @@ func main() {
 	seedCount := flag.Int("seeds", 100, "Number of seed verses to evaluate")
 	minXRefs := flag.Int("min-xrefs", 5, "Minimum cross-references per seed verse")
 	skipLoad := flag.Bool("skip-load", false, "Skip corpus load (reuse existing data dir)")
+	importFrom := flag.String("import-from", "", "Import vault from .muninn file before eval (skips corpus load)")
+	exportTo := flag.String("export-to", "", "Export vault to .muninn file after corpus load")
 	flag.Parse()
 
 	// Determine mode label for the report
@@ -40,7 +42,7 @@ func main() {
 	}
 
 	fmt.Printf("MuninnDB Bible Eval Harness\n")
-	fmt.Printf("════════════════════════════════════════════════════\n")
+	fmt.Printf("════════════════════════════════════════════════════════════════════\n")
 	fmt.Printf("Mode:       %s\n", mode)
 	fmt.Printf("Data dir:   %s\n", *dataDir)
 	fmt.Printf("KJV file:   %s\n", *kjvPath)
@@ -85,17 +87,31 @@ func main() {
 	}
 	defer ee.close()
 
-	// Load corpus unless --skip-load
 	var loadDur time.Duration
-	if !*skipLoad {
+
+	// Fast-path: import vault from .muninn file
+	if *importFrom != "" {
+		fmt.Printf("Importing vault from %s...\n", *importFrom)
+		f, openErr := os.Open(*importFrom)
+		if openErr != nil {
+			log.Fatalf("open import file: %v", openErr)
+		}
+		if importErr := ee.importVault(ctx, f); importErr != nil {
+			f.Close()
+			log.Fatalf("import vault: %v", importErr)
+		}
+		f.Close()
+		fmt.Println("Vault imported. Skipping corpus load.")
+	} else if !*skipLoad {
+		// Standard corpus load
 		fmt.Printf("Loading %d verses into vault 'bible'...\n", len(corpus))
 		loadStart := time.Now()
 		loaded := 0
-		errors := 0
+		loadErrors := 0
 		for i, req := range corpus {
 			if _, writeErr := ee.writeVerse(ctx, req); writeErr != nil {
-				errors++
-				if errors <= 5 {
+				loadErrors++
+				if loadErrors <= 5 {
 					log.Printf("  write error at index %d (%s): %v", i, req.Concept, writeErr)
 				}
 				continue
@@ -104,16 +120,31 @@ func main() {
 			if (i+1)%1000 == 0 {
 				elapsed := time.Since(loadStart).Seconds()
 				fmt.Printf("  %d/%d loaded (%.0f writes/sec, %d errors)...\n",
-					i+1, len(corpus), float64(i+1)/elapsed, errors)
+					i+1, len(corpus), float64(i+1)/elapsed, loadErrors)
 			}
 		}
 		loadDur = time.Since(loadStart)
 		fmt.Printf("Loaded %d/%d verses in %v (%d errors)\n\n",
-			loaded, len(corpus), loadDur.Round(time.Millisecond), errors)
+			loaded, len(corpus), loadDur.Round(time.Millisecond), loadErrors)
 
 		// Give FTS worker time to settle
 		fmt.Println("Waiting for FTS indexing to settle (2s)...")
 		time.Sleep(2 * time.Second)
+
+		// Export vault to .muninn file if requested
+		if *exportTo != "" {
+			fmt.Printf("Exporting vault to %s...\n", *exportTo)
+			f, createErr := os.Create(*exportTo)
+			if createErr != nil {
+				log.Printf("create export file: %v", createErr)
+			} else {
+				if exportErr := ee.exportVault(ctx, f); exportErr != nil {
+					log.Printf("export vault: %v", exportErr)
+				}
+				f.Close()
+				fmt.Printf("Vault exported to %s\n\n", *exportTo)
+			}
+		}
 	}
 
 	// Build lookup map for quick text access
@@ -127,7 +158,7 @@ func main() {
 
 	// Phase 2: Cognitive Properties
 	fmt.Printf("── Phase 2: Cognitive Properties ───────────────────\n")
-	p2 := RunPhase2(ctx, ee, filterJohnVerses(corpus))
+	p2 := RunPhase2(ctx, ee)
 
 	// Report
 	writeReport(os.Stdout, p1, p2, mode, len(corpus), loadDur)

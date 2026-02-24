@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"time"
 
 	"github.com/scrypster/muninndb/internal/cognitive"
 	"github.com/scrypster/muninndb/internal/engine"
@@ -132,6 +135,75 @@ func (ee *evalEngine) writeVerse(ctx context.Context, req mbp.WriteRequest) (sto
 	}
 
 	return id, nil
+}
+
+// errStopScan is a sentinel used to stop ScanEngrams early once a target is found.
+var errStopScan = errors.New("stop")
+
+// setEngramState finds an engram by concept and overwrites its cognitive state fields.
+// This is used by Phase 2 to install hand-crafted decay/access state into the corpus.
+func (ee *evalEngine) setEngramState(ctx context.Context, concept string, lastAccess time.Time, accessCount uint32, stability float32) error {
+	var targetID storage.ULID
+	var found bool
+	scanErr := ee.store.ScanEngrams(ctx, ee.ws, func(eng *storage.Engram) error {
+		if eng.Concept == concept {
+			targetID = eng.ID
+			found = true
+			return errStopScan
+		}
+		return nil
+	})
+	if scanErr != nil && !errors.Is(scanErr, errStopScan) {
+		return fmt.Errorf("scan for %q: %w", concept, scanErr)
+	}
+	if !found {
+		return fmt.Errorf("engram not found: %q", concept)
+	}
+	eng, err := ee.store.GetEngram(ctx, ee.ws, targetID)
+	if err != nil {
+		return fmt.Errorf("get engram %q: %w", concept, err)
+	}
+	eng.LastAccess = lastAccess
+	eng.AccessCount = accessCount
+	eng.Stability = stability
+	_, err = ee.store.WriteEngram(ctx, ee.ws, eng)
+	return err
+}
+
+// reloadHNSW re-inserts all vault engrams into the HNSW index.
+// Used after vault import to rebuild the in-memory index from stored engrams.
+func (ee *evalEngine) reloadHNSW(ctx context.Context) error {
+	if ee.hnswReg == nil {
+		return nil
+	}
+	return ee.store.ScanEngrams(ctx, ee.ws, func(eng *storage.Engram) error {
+		text := eng.Concept
+		if eng.Content != "" {
+			text += ". " + eng.Content
+		}
+		vec, embedErr := ee.embedder.Embed(ctx, []string{text})
+		if embedErr != nil {
+			return nil // skip individual failures
+		}
+		_ = ee.hnswReg.Insert(ctx, ee.ws, [16]byte(eng.ID), vec)
+		return nil
+	})
+}
+
+// importVault imports a .muninn archive into the vault and reloads HNSW.
+func (ee *evalEngine) importVault(ctx context.Context, r io.Reader) error {
+	opts := storage.ImportOpts{}
+	if _, err := ee.store.ImportVaultData(ctx, ee.ws, "bible", opts, r); err != nil {
+		return fmt.Errorf("import vault data: %w", err)
+	}
+	return ee.reloadHNSW(ctx)
+}
+
+// exportVault writes the vault as a .muninn archive to w.
+func (ee *evalEngine) exportVault(ctx context.Context, w io.Writer) error {
+	opts := storage.ExportOpts{}
+	_, err := ee.store.ExportVaultData(ctx, ee.ws, "bible", opts, w)
+	return err
 }
 
 // activate queries the engine with the given context strings and returns the top-10 results.

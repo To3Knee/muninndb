@@ -32,3 +32,10 @@ muninndb-data/
 testdata/bible/kjv.json
 testdata/bible/cross-refs.tsv
 testdata/bible/cross-refs.csv
+testdata/bible/*.muninn
+
+# Planning and design docs — not committed
+docs/plans/
+
+# Built eval binary
+/eval-bible

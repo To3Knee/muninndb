@@ -26,37 +26,43 @@ func writeReport(w io.Writer, p1 Phase1Result, p2 Phase2Result, mode string, cor
 	fmt.Fprintf(w, "\n")
 
 	fmt.Fprintf(w, "── Phase 2: Cognitive Properties ──────────────────────────────\n")
-	fmt.Fprintf(w, "Baseline NDCG:     %.4f\n", p2.BaselineNDCG)
-	fmt.Fprintf(w, "Post-reading NDCG: %.4f\n", p2.PostReadingNDCG)
-	fmt.Fprintf(w, "Post-decay NDCG:   %.4f\n", p2.PostDecayNDCG)
-	cognitiveImproved := p2.PostReadingNDCG > p2.BaselineNDCG
-	fmt.Fprintf(w, "Cognitive change:  %+.4f (%s)\n",
-		p2.PostReadingNDCG-p2.BaselineNDCG,
-		func() string {
-			if cognitiveImproved {
-				return "improved"
-			}
-			return "no improvement"
-		}())
+
+	fmt.Fprintf(w, "Sub-experiment A: Decay Bias\n")
+	fmt.Fprintf(w, "  Fresh (NT) MRR@10:  %.4f\n", p2.FreshMRR)
+	fmt.Fprintf(w, "  Stale (OT) MRR@10:  %.4f\n", p2.StaleMRR)
+	fmt.Fprintf(w, "  Decay score:        %.4f  (positive = decay working)\n", p2.DecayScore)
+	if len(p2.AnchorResults) > 0 {
+		fmt.Fprintf(w, "\n  %-20s  %8s  %8s\n", "Query", "FreshMRR", "StaleMRR")
+		fmt.Fprintf(w, "  %-20s  %8s  %8s\n", "--------------------", "--------", "--------")
+		for _, a := range p2.AnchorResults {
+			fmt.Fprintf(w, "  %-20s  %8.4f  %8.4f\n", a.Label, a.FreshMRR, a.StaleMRR)
+		}
+	}
 	fmt.Fprintf(w, "\n")
 
-	if len(p2.QueryDeltas) > 0 {
-		fmt.Fprintf(w, "  Per-query deltas:\n")
-		fmt.Fprintf(w, "  %-22s  %8s  %8s  %8s\n", "Label", "Baseline", "PostRead", "Delta")
-		fmt.Fprintf(w, "  %-22s  %8s  %8s  %8s\n", "----------------------", "--------", "--------", "--------")
-		for _, d := range p2.QueryDeltas {
-			fmt.Fprintf(w, "  %-22s  %8.4f  %8.4f  %+8.4f\n", d.Label, d.BaselineNDCG, d.PostReadNDCG, d.Delta)
+	fmt.Fprintf(w, "Sub-experiment B: Hebbian Lift\n")
+	fmt.Fprintf(w, "  Avg rank delta:     %.2f  (positive = linked OT ranks higher)\n", p2.HebbianScore)
+	if len(p2.PairResults) > 0 {
+		fmt.Fprintf(w, "\n  %-18s  %-18s  %6s  %7s  %5s\n",
+			"OT (linked)", "Control", "Linked", "Control", "Delta")
+		fmt.Fprintf(w, "  %-18s  %-18s  %6s  %7s  %5s\n",
+			"------------------", "------------------", "------", "-------", "-----")
+		for _, pr := range p2.PairResults {
+			fmt.Fprintf(w, "  %-18s  %-18s  %6d  %7d  %+5d\n",
+				pr.OTVerse, pr.Control, pr.LinkedRank, pr.ControlRank, pr.Delta)
 		}
-		fmt.Fprintf(w, "\n")
 	}
+	fmt.Fprintf(w, "\n")
 
+	decayWorking := p2.DecayScore > 0
+	hebbianWorking := p2.HebbianScore > 0
 	fmt.Fprintf(w, "── Verdict ─────────────────────────────────────────────────────\n")
-	fmt.Fprintf(w, "%s\n", verdictLine(p1.NDCGAtK, cognitiveImproved))
+	fmt.Fprintf(w, "%s\n", verdictLine(p1.NDCGAtK, decayWorking, hebbianWorking))
 	fmt.Fprintf(w, "════════════════════════════════════════════════════════════════\n")
 }
 
-// verdictLine returns a one-line summary verdict based on NDCG and cognitive improvement.
-func verdictLine(ndcg float64, cognitiveImproved bool) string {
+// verdictLine returns a one-line summary verdict.
+func verdictLine(ndcg float64, decayWorking, hebbianWorking bool) string {
 	quality := "POOR"
 	switch {
 	case ndcg >= 0.5:
@@ -67,12 +73,19 @@ func verdictLine(ndcg float64, cognitiveImproved bool) string {
 		quality = "ACCEPTABLE"
 	}
 
-	cog := "no Hebbian signal"
-	if cognitiveImproved {
-		cog = "Hebbian learning confirmed"
+	cogParts := ""
+	switch {
+	case decayWorking && hebbianWorking:
+		cogParts = "decay + Hebbian confirmed"
+	case decayWorking:
+		cogParts = "decay confirmed, no Hebbian signal"
+	case hebbianWorking:
+		cogParts = "Hebbian confirmed, no decay signal"
+	default:
+		cogParts = "no cognitive signal"
 	}
 
-	return fmt.Sprintf("Retrieval quality: %s (NDCG@10=%.4f) | Cognitive: %s", quality, ndcg, cog)
+	return fmt.Sprintf("Retrieval quality: %s (NDCG@10=%.4f) | Cognitive: %s", quality, ndcg, cogParts)
 }
 
 // saveReport writes the report to a file, appending if it already exists.
