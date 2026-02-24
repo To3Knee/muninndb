@@ -110,7 +110,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: scrypster/homebrew-tap
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          token: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
           path: homebrew-tap
 
       - name: Download release binaries and compute SHA256s
