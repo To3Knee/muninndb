@@ -52,10 +52,9 @@ _ort-darwin-amd64:
 	@curl -fL --progress-bar \
 		"https://github.com/microsoft/onnxruntime/releases/download/v$(ORT_VERSION_DARWIN_AMD64)/onnxruntime-osx-x86_64-$(ORT_VERSION_DARWIN_AMD64).tgz" \
 		-o "/tmp/ort-osx-amd64.tgz"
-	@tar -xzf /tmp/ort-osx-amd64.tgz -C /tmp onnxruntime-osx-x86_64-$(ORT_VERSION_DARWIN_AMD64)/lib/libonnxruntime.dylib 2>/dev/null || \
-		tar -xzf /tmp/ort-osx-amd64.tgz -C /tmp --strip-components=2 --wildcards '*/lib/libonnxruntime.dylib'
-	@cp /tmp/onnxruntime-osx-x86_64-$(ORT_VERSION_DARWIN_AMD64)/lib/libonnxruntime.dylib $(ASSETS_DIR)/libonnxruntime_darwin_amd64.dylib 2>/dev/null || \
-		cp /tmp/libonnxruntime.dylib $(ASSETS_DIR)/libonnxruntime_darwin_amd64.dylib
+	@rm -rf /tmp/ort-osx-amd64-extract && mkdir -p /tmp/ort-osx-amd64-extract
+	@tar -xzf /tmp/ort-osx-amd64.tgz -C /tmp/ort-osx-amd64-extract/
+	@find /tmp/ort-osx-amd64-extract/ -name 'libonnxruntime*.dylib' | head -1 | xargs -I{} cp {} $(ASSETS_DIR)/libonnxruntime_darwin_amd64.dylib
 	@echo "    darwin/amd64: $$(du -sh $(ASSETS_DIR)/libonnxruntime_darwin_amd64.dylib | cut -f1)"
 
 _ort-linux-amd64:
