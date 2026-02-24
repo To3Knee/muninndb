@@ -2,11 +2,13 @@ package rest
 
 import (
 	"context"
+	"io"
 	"time"
 
 	"github.com/scrypster/muninndb/internal/cognitive"
 	"github.com/scrypster/muninndb/internal/engine/trigger"
 	"github.com/scrypster/muninndb/internal/engine/vaultjob"
+	"github.com/scrypster/muninndb/internal/storage"
 	mbp "github.com/scrypster/muninndb/internal/transport/mbp"
 )
 
@@ -90,6 +92,10 @@ type EngineAPI interface {
 	StartMerge(ctx context.Context, sourceVault, targetVault string, deleteSource bool) (*vaultjob.Job, error)
 	// GetVaultJob returns the status of a vault clone/merge job by ID.
 	GetVaultJob(jobID string) (*vaultjob.Job, bool)
+	// ExportVault synchronously exports the named vault to w as a .muninn archive.
+	ExportVault(ctx context.Context, vaultName, embedderModel string, dimension int, resetMeta bool, w io.Writer) (*storage.ExportResult, error)
+	// StartImport starts an async job to import a .muninn archive into a new vault.
+	StartImport(ctx context.Context, vaultName, embedderModel string, dimension int, resetMeta bool, r io.Reader) (*vaultjob.Job, error)
 }
 
 // ── Web UI types ─────────────────────────────────────────────────────────

@@ -520,6 +520,68 @@ func (s *Server) handleMergeVault(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"job_id": job.ID})
 }
 
+// handleExportVault exports a vault as a .muninn archive.
+// GET /api/admin/vaults/{name}/export
+// Query params: reset_metadata=true (optional)
+// Response: application/gzip stream with Content-Disposition attachment.
+func (s *Server) handleExportVault(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "vault name required")
+		return
+	}
+	if !isValidVaultName(name) {
+		s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "vault name contains invalid characters")
+		return
+	}
+	resetMeta := r.URL.Query().Get("reset_metadata") == "true"
+
+	filename := name + ".muninn"
+	w.Header().Set("Content-Type", "application/gzip")
+	w.Header().Set("Content-Disposition", "attachment; filename=\""+filename+"\"")
+
+	_, err := s.engine.ExportVault(r.Context(), name, s.embedModel, 0, resetMeta, w)
+	if err != nil {
+		if errors.Is(err, engine.ErrVaultNotFound) {
+			// Headers not yet committed — safe to send JSON error.
+			s.sendError(w, http.StatusNotFound, ErrVaultNotFound, err.Error())
+			return
+		}
+		slog.Error("rest: export vault failed", "vault", name, "err", err)
+		return
+	}
+}
+
+// handleImportVault imports a .muninn archive into a new vault.
+// POST /api/admin/vaults/import?vault=NAME
+// Body: raw .muninn archive (gzip'd tar)
+// Response 202: {"job_id": "..."}
+func (s *Server) handleImportVault(w http.ResponseWriter, r *http.Request) {
+	vaultName := r.URL.Query().Get("vault")
+	if vaultName == "" {
+		s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "vault query parameter required")
+		return
+	}
+	if !isValidVaultName(vaultName) {
+		s.sendError(w, http.StatusBadRequest, ErrInvalidEngram, "vault name contains invalid characters")
+		return
+	}
+	resetMeta := r.URL.Query().Get("reset_metadata") == "true"
+
+	job, err := s.engine.StartImport(r.Context(), vaultName, s.embedModel, 0, resetMeta, r.Body)
+	if err != nil {
+		if errors.Is(err, engine.ErrVaultNotFound) {
+			s.sendError(w, http.StatusNotFound, ErrVaultNotFound, err.Error())
+			return
+		}
+		s.sendError(w, http.StatusInternalServerError, ErrStorageError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]string{"job_id": job.ID})
+}
+
 // handleVaultJobStatus returns the current status of a vault clone/merge job.
 // GET /api/admin/vaults/{name}/job-status?job_id=...
 // Response 200: StatusSnapshot JSON

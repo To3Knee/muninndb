@@ -345,3 +345,61 @@ func TestHandleVaultJobStatus_WrongVaultScope(t *testing.T) {
 		t.Fatalf("expected 404 for wrong vault scope, got %d: %s", w.Code, w.Body.String())
 	}
 }
+
+// ---------------------------------------------------------------------------
+// handleExportVault
+// ---------------------------------------------------------------------------
+
+func TestHandleExportVault_Success(t *testing.T) {
+	srv := newVaultTestServer(&MockEngine{})
+	w := serveVault(srv, "GET", "/api/admin/vaults/myvault/export", nil, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	cd := w.Header().Get("Content-Disposition")
+	if cd == "" {
+		t.Error("expected Content-Disposition header")
+	}
+}
+
+func TestHandleExportVault_InvalidName(t *testing.T) {
+	srv := newVaultTestServer(&MockEngine{})
+	w := serveVault(srv, "GET", "/api/admin/vaults/INVALID_CAPS/export", nil, nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// handleImportVault
+// ---------------------------------------------------------------------------
+
+func TestHandleImportVault_Success(t *testing.T) {
+	srv := newVaultTestServer(&MockEngine{})
+	body := []byte("fake-archive-data")
+	req := httptest.NewRequest("POST", "/api/admin/vaults/import?vault=newvault", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/octet-stream")
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["job_id"] == "" {
+		t.Fatal("expected non-empty job_id in response")
+	}
+}
+
+func TestHandleImportVault_MissingVaultName(t *testing.T) {
+	srv := newVaultTestServer(&MockEngine{})
+	body := []byte("fake-archive-data")
+	req := httptest.NewRequest("POST", "/api/admin/vaults/import", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing vault name, got %d", w.Code)
+	}
+}

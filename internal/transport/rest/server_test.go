@@ -1,9 +1,11 @@
 package rest
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +15,7 @@ import (
 	"github.com/scrypster/muninndb/internal/cognitive"
 	"github.com/scrypster/muninndb/internal/engine/trigger"
 	"github.com/scrypster/muninndb/internal/engine/vaultjob"
+	"github.com/scrypster/muninndb/internal/storage"
 	mbp "github.com/scrypster/muninndb/internal/transport/mbp"
 )
 
@@ -133,6 +136,18 @@ func (m *MockEngine) StartMerge(ctx context.Context, sourceVault, targetVault st
 	return &vaultjob.Job{ID: "mock-merge-job", Operation: "merge", Source: sourceVault, Target: targetVault}, nil
 }
 func (m *MockEngine) GetVaultJob(jobID string) (*vaultjob.Job, bool) { return nil, false }
+
+func (m *MockEngine) ExportVault(ctx context.Context, vaultName, embedderModel string, dimension int, resetMeta bool, w io.Writer) (*storage.ExportResult, error) {
+	// Write a minimal non-empty response so callers can tell export ran.
+	w.Write([]byte("mock-export"))
+	return &storage.ExportResult{EngramCount: 0, TotalKeys: 0}, nil
+}
+func (m *MockEngine) StartImport(ctx context.Context, vaultName, embedderModel string, dimension int, resetMeta bool, r io.Reader) (*vaultjob.Job, error) {
+	return &vaultjob.Job{ID: "mock-import-job", Operation: "import", Target: vaultName}, nil
+}
+
+// Ensure bytes import is used.
+var _ = bytes.NewReader
 
 func TestHealthEndpoint(t *testing.T) {
 	engine := &MockEngine{}

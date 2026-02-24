@@ -2,12 +2,14 @@ package rest
 
 import (
 	"context"
+	"io"
 
 	"github.com/scrypster/muninndb/internal/cognitive"
 	"github.com/scrypster/muninndb/internal/engine"
 	"github.com/scrypster/muninndb/internal/engine/trigger"
 	"github.com/scrypster/muninndb/internal/engine/vaultjob"
 	hnswpkg "github.com/scrypster/muninndb/internal/index/hnsw"
+	"github.com/scrypster/muninndb/internal/storage"
 	mbp "github.com/scrypster/muninndb/internal/transport/mbp"
 )
 
@@ -197,4 +199,12 @@ func (w *RESTEngineWrapper) StartMerge(ctx context.Context, sourceVault, targetV
 
 func (w *RESTEngineWrapper) GetVaultJob(jobID string) (*vaultjob.Job, bool) {
 	return w.engine.GetVaultJob(jobID)
+}
+
+func (w *RESTEngineWrapper) ExportVault(ctx context.Context, vaultName, embedderModel string, dimension int, resetMeta bool, wr io.Writer) (*storage.ExportResult, error) {
+	return w.engine.ExportVault(ctx, vaultName, embedderModel, dimension, resetMeta, wr)
+}
+
+func (w *RESTEngineWrapper) StartImport(ctx context.Context, vaultName, embedderModel string, dimension int, resetMeta bool, r io.Reader) (*vaultjob.Job, error) {
+	return w.engine.StartImport(ctx, vaultName, embedderModel, dimension, resetMeta, r)
 }

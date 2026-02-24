@@ -145,6 +145,8 @@ func NewServer(addr string, engine EngineAPI, authStore *auth.Store, sessionSecr
 	mux.HandleFunc("POST /api/admin/vaults/{name}/clone", s.withAdminMiddleware(s.handleCloneVault))
 	mux.HandleFunc("POST /api/admin/vaults/{name}/merge-into", s.withAdminMiddleware(s.handleMergeVault))
 	mux.HandleFunc("GET /api/admin/vaults/{name}/job-status", s.withAdminMiddleware(s.handleVaultJobStatus))
+	mux.HandleFunc("GET /api/admin/vaults/{name}/export", s.withAdminMiddleware(s.handleExportVault))
+	mux.HandleFunc("POST /api/admin/vaults/import", s.withAdminMiddleware(s.withLargeBody(s.handleImportVault)))
 
 	// Cluster management — session auth required
 	mux.HandleFunc("GET /api/admin/cluster/token", s.withAdminMiddleware(s.handleAdminClusterToken))
@@ -344,6 +346,15 @@ func (s *Server) withAdminMiddleware(handler http.HandlerFunc) http.HandlerFunc 
 // bodySizeMiddleware limits request bodies to 4 MB to prevent resource exhaustion.
 func (s *Server) bodySizeMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	const maxBody = 4 << 20 // 4 MB
+	return func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxBody)
+		next(w, r)
+	}
+}
+
+// withLargeBody replaces the body size limit with 512 MB for bulk import operations.
+func (s *Server) withLargeBody(next http.HandlerFunc) http.HandlerFunc {
+	const maxBody = 512 << 20 // 512 MB
 	return func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, maxBody)
 		next(w, r)
