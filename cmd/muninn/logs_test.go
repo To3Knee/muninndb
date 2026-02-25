@@ -4,9 +4,33 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+type syncBuilder struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (s *syncBuilder) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *syncBuilder) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
+func (s *syncBuilder) Len() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Len()
+}
 
 func TestLogFilePath(t *testing.T) {
 	path := logFilePath()
@@ -203,8 +227,8 @@ func TestTailLogShowsHistory(t *testing.T) {
 	}
 	f.Close()
 
-	var out strings.Builder
-	var errOut strings.Builder
+	var out syncBuilder
+	var errOut syncBuilder
 	done := make(chan struct{})
 	go func() {
 		defer func() { recover() }()

@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // --- printHelp ---
@@ -1104,15 +1105,13 @@ func TestTailLog_FileNotExist(t *testing.T) {
 }
 
 func TestTailLog_ExistingFile(t *testing.T) {
-	// Create a temp log file with some content
 	dir := t.TempDir()
 	logPath := dir + "/test.log"
 	os.WriteFile(logPath, []byte("line1\nline2\n"), 0644)
 
-	var out strings.Builder
-	var errOut strings.Builder
+	var out syncBuilder
+	var errOut syncBuilder
 
-	// tailLog blocks forever, so run in goroutine and cancel quickly
 	done := make(chan struct{})
 	go func() {
 		defer func() { recover() }()
@@ -1120,30 +1119,9 @@ func TestTailLog_ExistingFile(t *testing.T) {
 		close(done)
 	}()
 
-	// Give it a moment then check that it started
 	select {
 	case <-done:
-	case <-func() <-chan struct{} {
-		ch := make(chan struct{})
-		go func() {
-			// Wait 100ms then close
-			<-func() <-chan struct{} {
-				c := make(chan struct{})
-				go func() {
-					for i := 0; i < 10; i++ {
-						if strings.Contains(out.String(), "tailing") {
-							close(c)
-							return
-						}
-					}
-					close(c)
-				}()
-				return c
-			}()
-			close(ch)
-		}()
-		return ch
-	}():
+	case <-time.After(200 * time.Millisecond):
 	}
 
 	if errOut.Len() > 0 {
@@ -1156,8 +1134,8 @@ func TestTailLog_WithLevelFilter(t *testing.T) {
 	logPath := dir + "/test.log"
 	os.WriteFile(logPath, []byte("INFO starting\nERROR failed\n"), 0644)
 
-	var out strings.Builder
-	var errOut strings.Builder
+	var out syncBuilder
+	var errOut syncBuilder
 
 	done := make(chan struct{})
 	go func() {
@@ -1166,11 +1144,9 @@ func TestTailLog_WithLevelFilter(t *testing.T) {
 		close(done)
 	}()
 
-	// Brief wait to let goroutine print headers
-	for i := 0; i < 50; i++ {
-		if strings.Contains(out.String(), "filter:") {
-			break
-		}
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
 	}
 
 	output := out.String()
