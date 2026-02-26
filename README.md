@@ -251,6 +251,51 @@ chain = ConversationChain(llm=your_llm, memory=memory)
 # Every turn is stored. Every response draws on relevant past context.
 ```
 
+**Go SDK:**
+
+```go
+import "github.com/scrypster/muninndb/sdk/go/muninn"
+
+client := muninn.NewClient("http://localhost:8475", "your-api-key")
+id, _ := client.Write(ctx, "default", "auth architecture",
+    "Short-lived JWTs, refresh in HttpOnly cookies", []string{"auth"})
+resp, _ := client.Activate(ctx, "default", []string{"login flow"}, 5)
+```
+
+```bash
+go get github.com/scrypster/muninndb/sdk/go/muninn
+```
+
+**Node.js / TypeScript SDK:**
+
+```typescript
+import { MuninnClient } from '@muninndb/client';
+
+const client = new MuninnClient({ token: 'your-api-key' });
+const { id } = await client.write({ concept: 'auth architecture',
+    content: 'Short-lived JWTs, refresh in HttpOnly cookies' });
+const result = await client.activate({ context: ['login flow'] });
+```
+
+```bash
+npm install @muninndb/client
+```
+
+**PHP SDK:**
+
+```php
+use MuninnDB\MuninnClient;
+
+$client = new MuninnClient(token: 'your-api-key');
+$result = $client->write(concept: 'auth architecture',
+    content: 'Short-lived JWTs, refresh in HttpOnly cookies');
+$memories = $client->activate(context: ['login flow']);
+```
+
+```bash
+composer require muninndb/client
+```
+
 [More examples →](sdk/python/examples/) · [Full API reference →](https://muninndb.com/docs)
 
 ---
@@ -307,7 +352,9 @@ docker run -d \
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). PRs welcome. For large changes, open an issue first.
+PRs welcome. For large changes, open an issue first.
+
+By submitting a pull request, you agree to the [Contributor License Agreement](CLA.md).
 
 Ports at a glance: `8474` MBP · `8475` REST · `8476` Web UI · `8477` gRPC · `8750` MCP
 
