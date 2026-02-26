@@ -77,7 +77,7 @@ type resolvedWeights struct {
 
 	// ACT-R: Adaptive Control of Thought-Rational scoring (Anderson, 1993).
 	// When UseACTR=true, replaces the additive weighted sum with:
-	//   B(M) = ln(n+1) - d * ln(max(ageDays,0.1) / (n+1))  [base-level activation]
+	//   B(M) = ln(n+1) - d * ln(max(ageDays,ageFloor) / (n+1))  [base-level activation]
 	//   Score = ContentMatch × softplus(B(M) + scale×Hebbian) × Confidence
 	//
 	// This resolves the decay-vs-Hebbian tension: both are ADDITIVE inside softplus.
@@ -1042,6 +1042,19 @@ func (e *ActivationEngine) phase6Score(
 		ids[i] = c.id
 	}
 
+	// Look up per-engram cache access time BEFORE GetEngrams to avoid
+	// contamination: GetEngrams populates/touches the L1 cache (setting
+	// lastAccess = now), which would make every engram appear "just accessed."
+	// By reading first, only engrams recalled in a *prior* activation carry
+	// a cache timestamp; cache-cold engrams return 0 so the scorer falls
+	// back to eng.LastAccess (the persisted write/CreatedAt time).
+	lastAccessNsByID := make(map[storage.ULID]int64, len(all))
+	for _, c := range all {
+		if ns := e.store.EngramLastAccessNs(ws, c.id); ns != 0 {
+			lastAccessNsByID[c.id] = ns
+		}
+	}
+
 	// Load full engrams for all candidates in one pass.
 	// Previously this was two passes: GetMetadata (all candidates) + GetEngrams (scored subset).
 	// Loading full engrams upfront eliminates the second pass entirely — engrams are already
@@ -1065,16 +1078,6 @@ func (e *ActivationEngine) phase6Score(
 	for _, eng := range allEngrams {
 		if eng != nil {
 			engramByID[eng.ID] = eng
-		}
-	}
-
-	// Look up per-engram cache access time to use for recency scoring.
-	// Cache hits return the time they were last recalled (≈ now); misses return 0
-	// so computeComponents falls back to eng.LastAccess (the persisted write time).
-	lastAccessNsByID := make(map[storage.ULID]int64, len(all))
-	for _, c := range all {
-		if ns := e.store.EngramLastAccessNs(ws, c.id); ns != 0 {
-			lastAccessNsByID[c.id] = ns
 		}
 	}
 
@@ -1323,7 +1326,7 @@ func softplus(x float64) float64 {
 
 // computeACTR computes the ACT-R scoring components for a candidate engram.
 // Formula (Anderson 1993):
-//   B(M) = ln(n+1) - d × ln(max(ageDays,0.1) / (n+1))   [base-level activation]
+//   B(M) = ln(n+1) - d × ln(max(ageDays,ageFloor) / (n+1))   [base-level activation]
 //   Score = ContentMatch × softplus(B(M) + scale×Hebbian) × Confidence
 //
 // ContentMatch gates the score: zero semantic relevance = zero score regardless of recency.
@@ -1337,7 +1340,7 @@ func computeACTR(vectorScore, ftsScore, hebbianBoost, transitionBoost float64, e
 	contentMatch := w.SemanticSimilarity*vectorScore + w.FullTextRelevance*normalizedFTS
 
 	// Compute ACT-R base-level activation B(M).
-	// B(M) = ln(n+1) - d × ln(max(ageDays, 0.1) / (n+1))
+	// B(M) = ln(n+1) - d × ln(max(ageDays, ageFloor) / (n+1))
 	// High n + low ageDays → high B (fresh, frequently accessed → strong base level)
 	// Low n + high ageDays → low B (old, rarely accessed → weak base level)
 	var lastAccess time.Time
@@ -1351,10 +1354,11 @@ func computeACTR(vectorScore, ftsScore, hebbianBoost, transitionBoost float64, e
 	if lastAccess.IsZero() || lastAccess.Year() < 2000 {
 		lastAccess = now
 	}
-	ageDays := math.Max(now.Sub(lastAccess).Hours()/24.0, 0.1)
+	const ageFloorDays = 1.0 / (24.0 * 60.0) // 1 minute — sub-hour precision for intraday recall
+	ageDays := math.Max(now.Sub(lastAccess).Hours()/24.0, ageFloorDays)
 	n := float64(eng.AccessCount + 1) // +1 avoids ln(0) for never-accessed engrams
 	d := w.ACTRDecay                  // power-law forgetting exponent (default 0.5)
-	baseLevel := math.Log(n) - d*math.Log(math.Max(ageDays, 0.1)/n)
+	baseLevel := math.Log(n) - d*math.Log(math.Max(ageDays, ageFloorDays)/n)
 
 	// Total activation = base-level + scaled Hebbian boost + scaled transition boost.
 	// ACTRHebScale (default 4.0) amplifies both Hebbian and transition signals so

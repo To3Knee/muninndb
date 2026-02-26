@@ -53,7 +53,7 @@ func TestComputeACTR_FreshEngram(t *testing.T) {
 
 	contentMatch := 0.35*0.9 + 0.25*math.Tanh(2.0)
 	n := 2.0       // AccessCount(1) + 1
-	ageDays := 0.1 // floor for zero-age
+	ageDays := 1.0 / (24.0 * 60.0) // floor: 1 minute
 	baseLevel := math.Log(n) - 0.5*math.Log(ageDays/n)
 	wantRaw := expectedACTRRaw(contentMatch, baseLevel, 4.0, 0.0)
 
@@ -202,7 +202,7 @@ func TestComputeACTR_ScoreClamping(t *testing.T) {
 	// Verify it actually hit the ceiling (pre-clamp value exceeds 1.0).
 	contentMatch := 0.35*1.0 + 0.25*math.Tanh(10.0)
 	n := 51.0
-	ageDays := 0.1
+	ageDays := 1.0 / (24.0 * 60.0) // floor: 1 minute
 	baseLevel := math.Log(n) - 0.5*math.Log(ageDays/n)
 	totalActivation := baseLevel + 4.0*1.0
 	unclamped := contentMatch * softplus(totalActivation) / actrDenominator
@@ -224,10 +224,10 @@ func TestComputeACTR_ZeroLastAccess(t *testing.T) {
 
 	sc := computeACTR(0.8, 1.0, 0.0, 0.0, eng, 0, now, w)
 
-	// Zero LastAccess → treated as "just now" → ageDays = 0.1
+	// Zero LastAccess → treated as "just now" → ageDays = ageFloor (1 minute)
 	contentMatch := 0.35*0.8 + 0.25*math.Tanh(1.0)
 	n := 1.0
-	ageDays := 0.1
+	ageDays := 1.0 / (24.0 * 60.0) // floor: 1 minute
 	baseLevel := math.Log(n) - 0.5*math.Log(ageDays/n)
 	wantRaw := expectedACTRRaw(contentMatch, baseLevel, 4.0, 0.0)
 
@@ -378,7 +378,7 @@ func TestComputeACTR_DecayFactorReportedCorrectly(t *testing.T) {
 
 			sc := computeACTR(0.5, 0.5, 0.0, 0.0, eng, 0, now, w)
 
-			effectiveAgeDays := math.Max(now.Sub(lastAccess).Hours()/24.0, 0.1)
+			effectiveAgeDays := math.Max(now.Sub(lastAccess).Hours()/24.0, 1.0/(24.0*60.0))
 			wantDecay := math.Max(0.05, math.Exp(-effectiveAgeDays/float64(tt.stability)))
 
 			assertNear(t, "DecayFactor", sc.DecayFactor, wantDecay, 1e-6)
