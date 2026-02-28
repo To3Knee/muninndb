@@ -1456,3 +1456,21 @@ func TestGuideEndpoint(t *testing.T) {
 		t.Error("expected non-empty guide text")
 	}
 }
+
+func TestHandleObservability(t *testing.T) {
+	eng := &MockEngine{}
+	server := NewServer("localhost:8080", eng, nil, nil, nil, EmbedInfo{}, nil, "")
+
+	req := httptest.NewRequest("GET", "/api/admin/observability", nil)
+	w := httptest.NewRecorder()
+	server.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var snap engine.ObservabilitySnapshot
+	if err := json.NewDecoder(w.Body).Decode(&snap); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+}

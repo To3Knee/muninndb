@@ -1,6 +1,7 @@
 package latency
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -63,5 +64,55 @@ func TestTracker_RingWrap(t *testing.T) {
 	}
 	if stats.P50Ms < 0.5 || stats.P50Ms > 1.5 {
 		t.Errorf("P50 = %.1f, want ~1.0", stats.P50Ms)
+	}
+}
+
+func TestTracker_ConcurrentAccess(t *testing.T) {
+	tr := New()
+	ws := [8]byte{1}
+
+	var wg sync.WaitGroup
+	// 10 goroutines writing concurrently
+	for g := 0; g < 10; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 100; i++ {
+				tr.Record(ws, "write", time.Millisecond)
+			}
+		}()
+	}
+	// Concurrent reads while writes are happening
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 50; i++ {
+			_ = tr.For(ws, "write")
+			_ = tr.Snapshot()
+			time.Sleep(time.Microsecond)
+		}
+	}()
+	wg.Wait()
+
+	stats := tr.For(ws, "write")
+	if stats.Count != 1000 {
+		t.Errorf("Count = %d, want 1000", stats.Count)
+	}
+}
+
+func TestTracker_SingleSample(t *testing.T) {
+	tr := New()
+	ws := [8]byte{1}
+	tr.Record(ws, "write", 5*time.Millisecond)
+
+	stats := tr.For(ws, "write")
+	if stats.Count != 1 {
+		t.Errorf("Count = %d, want 1", stats.Count)
+	}
+	if stats.P50Ms < 4.5 || stats.P50Ms > 5.5 {
+		t.Errorf("P50 = %.1f, want ~5.0", stats.P50Ms)
+	}
+	if stats.P99Ms < 4.5 || stats.P99Ms > 5.5 {
+		t.Errorf("P99 = %.1f, want ~5.0", stats.P99Ms)
 	}
 }
