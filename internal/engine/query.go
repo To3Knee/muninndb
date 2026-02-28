@@ -30,6 +30,7 @@ type ExplainData struct {
 	FinalScore  float64
 	WouldReturn bool
 	Threshold   float64
+	Components  mbp.ScoreComponents
 }
 
 // GetAssociations returns the forward associations for a single engram by string ID.
@@ -126,6 +127,7 @@ func (e *Engine) Explain(ctx context.Context, vault, engramID string, query []st
 			result.WouldReturn = true
 			result.FinalScore = float64(item.Score)
 			result.Concept = item.Concept
+			result.Components = item.ScoreComponents
 			break
 		}
 	}

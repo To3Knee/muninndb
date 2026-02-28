@@ -87,8 +87,9 @@ func (ps *PebbleStore) WriteAssociation(ctx context.Context, wsPrefix [8]byte, s
 		return fmt.Errorf("commit batch: %w", err)
 	}
 
-	// Association list is TTL-cached; no immediate invalidation needed.
-	// New edges will be visible after assocCacheTTL (200ms).
+	// Invalidate source node's cached association list so BFS traversal
+	// sees the new edge immediately instead of waiting for TTL expiry.
+	ps.assocCache.Remove(assocCacheKey(wsPrefix, src))
 
 	return nil
 }
