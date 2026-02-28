@@ -116,11 +116,13 @@ func (e *Engine) SetOnWrite(fn func()) {
 }
 
 // SetLatencyTracker configures the per-vault latency tracker.
+// Must be called before the engine starts serving requests (not safe for concurrent use with Write/Activate/Read).
 func (e *Engine) SetLatencyTracker(t *latency.Tracker) {
 	e.latencyTracker = t
 }
 
 // SetRetroactiveProcessors registers background processors for observability.
+// Must be called before the engine starts serving requests (not safe for concurrent use with Observability).
 func (e *Engine) SetRetroactiveProcessors(procs ...*plugin.RetroactiveProcessor) {
 	e.retroProcessors = procs
 }

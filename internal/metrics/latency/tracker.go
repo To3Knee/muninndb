@@ -50,6 +50,9 @@ func (t *Tracker) Record(ws [8]byte, operation string, d time.Duration) {
 		rb = &ringBuffer{}
 		t.buffers[key] = rb
 	}
+	if rb.filled {
+		rb.sum -= rb.samples[rb.pos] // subtract evicted sample
+	}
 	rb.samples[rb.pos] = ms
 	rb.sum += ms
 	rb.count++
@@ -101,7 +104,7 @@ func computeStats(rb *ringBuffer) Stats {
 		P50Ms: percentile(sorted, 0.50),
 		P95Ms: percentile(sorted, 0.95),
 		P99Ms: percentile(sorted, 0.99),
-		AvgMs: rb.sum / float64(rb.count),
+		AvgMs: rb.sum / float64(n),
 		Count: rb.count,
 	}
 }
