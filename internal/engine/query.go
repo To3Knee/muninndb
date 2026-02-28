@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/scrypster/muninndb/internal/auth"
 	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
@@ -108,6 +109,10 @@ func (e *Engine) Traverse(ctx context.Context, vault, startID string, maxHops, m
 // Explain runs activation with the given query and returns score details for engramID.
 func (e *Engine) Explain(ctx context.Context, vault, engramID string, query []string) (*ExplainData, error) {
 	const threshold = 0.0
+	// Run activation in observe mode so we get accurate scores without
+	// triggering Hebbian co-activation, activity tracking, or PAS transitions.
+	// Explain is a diagnostic read — it should not mutate cognitive state.
+	ctx = context.WithValue(ctx, auth.ContextMode, "observe")
 	resp, err := e.Activate(ctx, &mbp.ActivateRequest{
 		Vault:      vault,
 		Context:    query,
