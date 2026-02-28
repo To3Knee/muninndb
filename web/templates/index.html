@@ -367,6 +367,20 @@
               <label>Created</label>
               <span style="color:var(--text-secondary);" x-text="selectedMemory.createdAt ? new Date(selectedMemory.createdAt * 1000).toLocaleString() : 'unknown'"></span>
             </div>
+            <div class="form-group" style="margin-top:1rem;">
+              <label>Lifecycle State</label>
+              <select class="input-field" style="margin-top:0.375rem;"
+                      :value="selectedMemory.state || 'active'"
+                      @change="updateLifecycleState(selectedMemory.id, $event.target.value)">
+                <option value="planning">planning</option>
+                <option value="active">active</option>
+                <option value="paused">paused</option>
+                <option value="blocked">blocked</option>
+                <option value="completed">completed</option>
+                <option value="cancelled">cancelled</option>
+                <option value="archived">archived</option>
+              </select>
+            </div>
           </div>
         </template>
       </div>
@@ -990,6 +1004,23 @@
                     style="padding:0.5rem 1rem;font-size:0.875rem;font-weight:500;border-radius:0.5rem;border:1px solid #c084fc;color:#a855f7;background:transparent;cursor:pointer;transition:background 0.15s;"
                     onmouseover="this.style.background='rgba(168,85,247,0.08)'" onmouseout="this.style.background='transparent'">
               Merge Into…
+            </button>
+            <button @click="exportVault()" :disabled="vaultExporting"
+                    style="padding:0.5rem 1rem;font-size:0.875rem;font-weight:500;border-radius:0.5rem;border:1px solid #34d399;color:#10b981;background:transparent;cursor:pointer;transition:background 0.15s;"
+                    onmouseover="this.style.background='rgba(52,211,153,0.08)'" onmouseout="this.style.background='transparent'"
+                    :style="vaultExporting ? 'opacity:0.55;cursor:not-allowed;' : ''">
+              <span x-text="vaultExporting ? 'Exporting…' : 'Export Vault'"></span>
+            </button>
+            <button @click="openImportModal()"
+                    style="padding:0.5rem 1rem;font-size:0.875rem;font-weight:500;border-radius:0.5rem;border:1px solid #f59e0b;color:#d97706;background:transparent;cursor:pointer;transition:background 0.15s;"
+                    onmouseover="this.style.background='rgba(245,158,11,0.08)'" onmouseout="this.style.background='transparent'">
+              Import Vault…
+            </button>
+            <button @click="reindexFTS()" :disabled="reindexing"
+                    style="padding:0.5rem 1rem;font-size:0.875rem;font-weight:500;border-radius:0.5rem;border:1px solid #60a5fa;color:#3b82f6;background:transparent;cursor:pointer;transition:background 0.15s;"
+                    onmouseover="this.style.background='rgba(96,165,250,0.08)'" onmouseout="this.style.background='transparent'"
+                    :style="reindexing ? 'opacity:0.55;cursor:not-allowed;' : ''">
+              <span x-text="reindexing ? 'Reindexing…' : 'Reindex FTS'"></span>
             </button>
           </div>
         </div>
@@ -2240,6 +2271,53 @@ Authorization = "Bearer &lt;token from ~/.muninn/mcp.token&gt;"</pre>
                 style="padding:0.5rem 1rem;font-size:0.875rem;font-weight:500;background:#a855f7;color:#fff;border:none;border-radius:0.5rem;"
                 :style="(!mergeModal.target || activeJob?.status === 'running') ? 'opacity:0.45;cursor:not-allowed;' : 'opacity:1;cursor:pointer;'">
           Merge
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Vault import modal ───────────────────────────────────────── -->
+  <div x-show="importModal.show" x-cloak
+       class="modal-backdrop" @click.self="importModal.show = false"
+       @keydown.escape.window="importModal.show = false">
+    <div class="modal-box" style="max-width:440px;">
+      <h2 style="margin:0 0 0.75rem;color:#d97706;">Import Vault</h2>
+      <p style="color:var(--text-secondary);font-size:0.875rem;margin:0 0 1rem;">
+        Import a <code>.muninn</code> export file into a new or existing vault.
+      </p>
+      <div class="form-group" style="margin-bottom:0.75rem;">
+        <label style="display:block;font-size:0.875rem;font-weight:500;margin-bottom:0.375rem;color:var(--text-primary);">Target vault name</label>
+        <input type="text" x-model="importModal.vaultName"
+               class="input-field"
+               placeholder="my-imported-vault" />
+      </div>
+      <div class="form-group" style="margin-bottom:0.75rem;">
+        <label style="display:block;font-size:0.875rem;font-weight:500;margin-bottom:0.375rem;color:var(--text-primary);">File</label>
+        <input type="file" accept=".muninn"
+               @change="importModal.file = $event.target.files[0]"
+               style="font-size:0.875rem;color:var(--text-primary);" />
+      </div>
+      <label style="display:flex;align-items:center;gap:0.5rem;font-size:0.875rem;color:var(--text-primary);margin-bottom:1rem;cursor:pointer;">
+        <input type="checkbox" x-model="importModal.resetMeta" />
+        Reset metadata (timestamps, access counts)
+      </label>
+      <div x-show="activeJob" style="margin-bottom:1rem;">
+        <p style="font-size:0.75rem;color:var(--text-muted);margin:0 0 0.25rem;"
+           x-text="activeJob?.phase === 'indexing' ? 'Re-indexing...' : 'Importing...'"></p>
+        <div style="height:0.5rem;background:var(--border-color,#e5e7eb);border-radius:9999px;overflow:hidden;">
+          <div style="height:100%;background:#f59e0b;border-radius:9999px;transition:width 0.5s ease;"
+               :style="'width:' + (activeJob?.pct || 0) + '%'"></div>
+        </div>
+        <p style="font-size:0.75rem;color:var(--text-muted);margin:0.25rem 0 0;"
+           x-text="(activeJob?.pct || 0).toFixed(0) + '%'"></p>
+      </div>
+      <div style="display:flex;justify-content:flex-end;gap:0.75rem;">
+        <button class="btn-secondary" @click="importModal.show = false; clearActiveJob()">Cancel</button>
+        <button @click="startImport()"
+                :disabled="!importModal.vaultName || !importModal.file || activeJob?.status === 'running'"
+                style="padding:0.5rem 1rem;font-size:0.875rem;font-weight:500;background:#f59e0b;color:#fff;border:none;border-radius:0.5rem;cursor:pointer;"
+                :style="(!importModal.vaultName || !importModal.file || activeJob?.status === 'running') ? 'opacity:0.45;cursor:not-allowed;' : 'opacity:1;cursor:pointer;'">
+          Import
         </button>
       </div>
     </div>

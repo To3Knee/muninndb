@@ -164,8 +164,11 @@ document.addEventListener('alpine:init', () => {
     vaultActionModal: { show: false, action: '', vault: '', confirmText: '', memCount: 0 },
     cloneModal: { show: false, source: '', newName: '' },
     mergeModal: { show: false, source: '', target: '', deleteSource: false },
+    importModal: { show: false, vaultName: '', file: null, resetMeta: false },
     activeJob: null,
     jobPollInterval: null,
+    vaultExporting: false,
+    reindexing: false,
 
     // Sidebar
     sidebarExpanded: localStorage.getItem('muninnSidebar') === 'expanded',
@@ -1695,6 +1698,108 @@ document.addEventListener('alpine:init', () => {
         this.jobPollInterval = null;
       }
       this.activeJob = null;
+    },
+
+    // ── Vault export ───────────────────────────────────────────────────────
+    async exportVault() {
+      this.vaultExporting = true;
+      try {
+        const res = await fetch('/api/admin/vaults/' + encodeURIComponent(this.vault) + '/export');
+        if (!res.ok) {
+          const text = await res.text().catch(() => res.statusText);
+          throw new Error(res.status + ': ' + text);
+        }
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = this.vault + '.muninn';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        this.addNotification('success', 'Vault exported: ' + this.vault + '.muninn');
+      } catch (e) {
+        this.addNotification('error', 'Export failed: ' + (e?.message || 'unknown error'));
+      } finally {
+        this.vaultExporting = false;
+      }
+    },
+
+    // ── Vault import ───────────────────────────────────────────────────────
+    openImportModal() {
+      this.importModal = { show: true, vaultName: '', file: null, resetMeta: false };
+    },
+
+    async startImport() {
+      if (!this.importModal.vaultName || !this.importModal.file) return;
+      const params = new URLSearchParams({
+        vault: this.importModal.vaultName,
+        reset_metadata: this.importModal.resetMeta ? 'true' : 'false',
+      });
+      try {
+        const res = await fetch('/api/admin/vaults/import?' + params.toString(), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body: this.importModal.file,
+        });
+        if (!res.ok) {
+          const text = await res.text().catch(() => res.statusText);
+          throw new Error(res.status + ': ' + text);
+        }
+        const data = await res.json();
+        const jobId = data.job_id;
+        this.startJobPolling(jobId, this.importModal.vaultName, () => {
+          this.loadVaults();
+          this.importModal.show = false;
+          this.addNotification('success', 'Vault imported successfully');
+        });
+      } catch (e) {
+        this.addNotification('error', 'Import failed: ' + (e?.message || 'unknown error'));
+      }
+    },
+
+    // ── FTS reindex ────────────────────────────────────────────────────────
+    async reindexFTS() {
+      if (!confirm('Reindex full-text search for vault "' + this.vault + '"?\n\nThis rebuilds the FTS index for all engrams. The vault stays queryable during reindex.')) return;
+      this.reindexing = true;
+      try {
+        const res = await fetch(
+          '/api/admin/vaults/' + encodeURIComponent(this.vault) + '/reindex-fts',
+          { method: 'POST' }
+        );
+        if (!res.ok) {
+          const text = await res.text().catch(() => res.statusText);
+          throw new Error(res.status + ': ' + text);
+        }
+        const data = await res.json();
+        this.addNotification('success', 'FTS reindex complete — ' + (data.engrams_reindexed || 0) + ' engrams reindexed');
+      } catch (e) {
+        this.addNotification('error', 'Reindex failed: ' + (e?.message || 'unknown error'));
+      } finally {
+        this.reindexing = false;
+      }
+    },
+
+    // ── Lifecycle state ────────────────────────────────────────────────────
+    async updateLifecycleState(id, state) {
+      try {
+        const res = await fetch('/api/engrams/' + encodeURIComponent(id) + '/state', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ vault: this.vault, state }),
+        });
+        if (!res.ok) {
+          const text = await res.text().catch(() => res.statusText);
+          throw new Error(res.status + ': ' + text);
+        }
+        if (this.selectedMemory && this.selectedMemory.id === id) {
+          this.selectedMemory = { ...this.selectedMemory, state };
+        }
+        this.addNotification('success', 'Lifecycle state updated to ' + state);
+      } catch (e) {
+        this.addNotification('error', 'State update failed: ' + (e?.message || 'unknown error'));
+      }
     },
 
     async probeOllama() {

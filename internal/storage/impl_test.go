@@ -880,3 +880,97 @@ func TestReadCoherenceMissReturnsNotFound(t *testing.T) {
 		t.Error("ReadCoherence on missing key returned ok=true, want false")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// WriteEngramBatch tests
+// ---------------------------------------------------------------------------
+
+// TestWriteEngramBatch_MultiItem batch-writes 3 engrams and verifies all are
+// retrievable via GetEngram.
+func TestWriteEngramBatch_MultiItem(t *testing.T) {
+	store := newTestStore(t)
+
+	ctx := context.Background()
+	ws := store.VaultPrefix("batch-multi")
+
+	engrams := []*Engram{
+		{Concept: "alpha", Content: "first content"},
+		{Concept: "beta", Content: "second content"},
+		{Concept: "gamma", Content: "third content"},
+	}
+
+	items := make([]EngramBatchItem, len(engrams))
+	for i, e := range engrams {
+		items[i] = EngramBatchItem{WSPrefix: ws, Engram: e}
+	}
+
+	ids, errs := store.WriteEngramBatch(ctx, items)
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("WriteEngramBatch item[%d]: %v", i, err)
+		}
+	}
+	if len(ids) != 3 {
+		t.Fatalf("expected 3 IDs, got %d", len(ids))
+	}
+
+	for i, id := range ids {
+		got, err := store.GetEngram(ctx, ws, id)
+		if err != nil {
+			t.Fatalf("GetEngram[%d]: %v", i, err)
+		}
+		if got.Concept != engrams[i].Concept {
+			t.Errorf("item[%d] Concept: got %q, want %q", i, got.Concept, engrams[i].Concept)
+		}
+		if got.Content != engrams[i].Content {
+			t.Errorf("item[%d] Content: got %q, want %q", i, got.Content, engrams[i].Content)
+		}
+	}
+}
+
+// TestWriteEngramBatch_EmptyInput verifies that an empty batch is a no-op with
+// no error and returns empty slices.
+func TestWriteEngramBatch_EmptyInput(t *testing.T) {
+	store := newTestStore(t)
+
+	ctx := context.Background()
+	ids, errs := store.WriteEngramBatch(ctx, []EngramBatchItem{})
+	if len(ids) != 0 {
+		t.Errorf("expected 0 IDs, got %d", len(ids))
+	}
+	if len(errs) != 0 {
+		t.Errorf("expected 0 errors, got %d", len(errs))
+	}
+}
+
+// TestWriteEngramBatch_VaultCountIncrement verifies that the vault count
+// increases by exactly the batch size after WriteEngramBatch.
+func TestWriteEngramBatch_VaultCountIncrement(t *testing.T) {
+	store := newTestStore(t)
+
+	ctx := context.Background()
+	ws := store.VaultPrefix("batch-count")
+
+	countBefore := store.GetVaultCount(ctx, ws)
+
+	const batchSize = 3
+	items := make([]EngramBatchItem, batchSize)
+	for i := range items {
+		items[i] = EngramBatchItem{
+			WSPrefix: ws,
+			Engram:   &Engram{Concept: "c", Content: "x"},
+		}
+	}
+
+	_, errs := store.WriteEngramBatch(ctx, items)
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("WriteEngramBatch item[%d]: %v", i, err)
+		}
+	}
+
+	countAfter := store.GetVaultCount(ctx, ws)
+	if countAfter-countBefore != batchSize {
+		t.Errorf("vault count increment: got %d, want %d", countAfter-countBefore, batchSize)
+	}
+}

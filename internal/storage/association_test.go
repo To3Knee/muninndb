@@ -6,6 +6,224 @@ import (
 	"time"
 )
 
+// ---------------------------------------------------------------------------
+// associationsForOne tests
+// ---------------------------------------------------------------------------
+
+// TestAssociationsForOne_CacheMiss verifies that associationsForOne reads from
+// Pebble (cache miss path) and returns the written edge.
+func TestAssociationsForOne_CacheMiss(t *testing.T) {
+	store := newTestStore(t)
+
+	ctx := context.Background()
+	ws := store.VaultPrefix("assoc-for-one-miss")
+
+	idA := NewULID()
+	idB := NewULID()
+
+	// Write an engram and an association A → B.
+	_, err := store.WriteEngram(ctx, ws, &Engram{Concept: "A", Content: "a"})
+	if err != nil {
+		t.Fatalf("WriteEngram A: %v", err)
+	}
+	if err := store.WriteAssociation(ctx, ws, idA, idB, &Association{
+		TargetID: idB,
+		Weight:   0.75,
+		RelType:  RelSupports,
+	}); err != nil {
+		t.Fatalf("WriteAssociation: %v", err)
+	}
+
+	// Use a fresh store so the assoc cache is cold.
+	fresh := NewPebbleStore(store.db, PebbleStoreConfig{CacheSize: 100})
+
+	assocs, err := fresh.associationsForOne(ws, idA, 50)
+	if err != nil {
+		t.Fatalf("associationsForOne: %v", err)
+	}
+	if len(assocs) != 1 {
+		t.Fatalf("expected 1 association, got %d", len(assocs))
+	}
+	got := assocs[0]
+	if got.TargetID != idB {
+		t.Errorf("TargetID: got %v, want %v", got.TargetID, idB)
+	}
+	if got.Weight < 0.74 || got.Weight > 0.76 {
+		t.Errorf("Weight: got %v, want ~0.75", got.Weight)
+	}
+}
+
+// TestAssociationsForOne_NoEdges verifies that associationsForOne returns an
+// empty (non-nil) slice for an engram with no outbound edges.
+func TestAssociationsForOne_NoEdges(t *testing.T) {
+	store := newTestStore(t)
+
+	ws := store.VaultPrefix("assoc-for-one-empty")
+	idA := NewULID()
+
+	assocs, err := store.associationsForOne(ws, idA, 50)
+	if err != nil {
+		t.Fatalf("associationsForOne: %v", err)
+	}
+	if len(assocs) != 0 {
+		t.Errorf("expected 0 associations, got %d", len(assocs))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// UpdateAssocWeightBatch tests
+// ---------------------------------------------------------------------------
+
+// TestUpdateAssocWeightBatch_SingleUpdate verifies that a batch update of a
+// single edge is reflected via GetAssociations.
+func TestUpdateAssocWeightBatch_SingleUpdate(t *testing.T) {
+	store := newTestStore(t)
+
+	ctx := context.Background()
+	ws := store.VaultPrefix("batch-update-single")
+
+	idA := NewULID()
+	idB := NewULID()
+
+	// Write initial edge with weight 0.5.
+	if err := store.WriteAssociation(ctx, ws, idA, idB, &Association{
+		TargetID: idB,
+		Weight:   0.5,
+	}); err != nil {
+		t.Fatalf("WriteAssociation: %v", err)
+	}
+
+	// Batch-update the edge weight to 0.8.
+	updates := []AssocWeightUpdate{
+		{WS: ws, Src: idA, Dst: idB, Weight: 0.8},
+	}
+	if err := store.UpdateAssocWeightBatch(ctx, updates); err != nil {
+		t.Fatalf("UpdateAssocWeightBatch: %v", err)
+	}
+
+	// Verify via GetAssocWeight (O(1) index path).
+	w, err := store.GetAssocWeight(ctx, ws, idA, idB)
+	if err != nil {
+		t.Fatalf("GetAssocWeight: %v", err)
+	}
+	if w < 0.79 || w > 0.81 {
+		t.Errorf("GetAssocWeight after batch update: got %v, want ~0.8", w)
+	}
+
+	// Verify via GetAssociations on a fresh (cold-cache) store.
+	fresh := NewPebbleStore(store.db, PebbleStoreConfig{CacheSize: 100})
+	results, err := fresh.GetAssociations(ctx, ws, []ULID{idA}, 10)
+	if err != nil {
+		t.Fatalf("GetAssociations: %v", err)
+	}
+	got := results[idA]
+	if len(got) != 1 {
+		t.Fatalf("expected 1 association after update, got %d", len(got))
+	}
+	if got[0].Weight < 0.79 || got[0].Weight > 0.81 {
+		t.Errorf("GetAssociations weight after batch update: got %v, want ~0.8", got[0].Weight)
+	}
+}
+
+// TestUpdateAssocWeightBatch_EmptyInput verifies that an empty batch is a no-op
+// and returns no error.
+func TestUpdateAssocWeightBatch_EmptyInput(t *testing.T) {
+	store := newTestStore(t)
+
+	ctx := context.Background()
+	if err := store.UpdateAssocWeightBatch(ctx, []AssocWeightUpdate{}); err != nil {
+		t.Fatalf("UpdateAssocWeightBatch with empty input: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// GetContradictions tests
+// ---------------------------------------------------------------------------
+
+// TestGetContradictions_Empty verifies that a fresh vault returns an empty slice.
+func TestGetContradictions_Empty(t *testing.T) {
+	store := newTestStore(t)
+
+	ctx := context.Background()
+	ws := store.VaultPrefix("contra-empty")
+
+	pairs, err := store.GetContradictions(ctx, ws)
+	if err != nil {
+		t.Fatalf("GetContradictions: %v", err)
+	}
+	if len(pairs) != 0 {
+		t.Errorf("expected 0 contradiction pairs, got %d", len(pairs))
+	}
+}
+
+// TestGetContradictions_WithPairs verifies that after flagging contradictions via
+// FlagContradiction, GetContradictions returns the deduplicated pairs.
+func TestGetContradictions_WithPairs(t *testing.T) {
+	store := newTestStore(t)
+
+	ctx := context.Background()
+	ws := store.VaultPrefix("contra-pairs")
+
+	idA := NewULID()
+	idB := NewULID()
+	idC := NewULID()
+
+	// Flag two distinct contradiction pairs.
+	if err := store.FlagContradiction(ctx, ws, idA, idB); err != nil {
+		t.Fatalf("FlagContradiction(A,B): %v", err)
+	}
+	if err := store.FlagContradiction(ctx, ws, idA, idC); err != nil {
+		t.Fatalf("FlagContradiction(A,C): %v", err)
+	}
+	// Flag the same pair again in reverse order — should NOT produce a duplicate.
+	if err := store.FlagContradiction(ctx, ws, idB, idA); err != nil {
+		t.Fatalf("FlagContradiction(B,A): %v", err)
+	}
+
+	pairs, err := store.GetContradictions(ctx, ws)
+	if err != nil {
+		t.Fatalf("GetContradictions: %v", err)
+	}
+	// Expect exactly 2 unique pairs: (A,B) and (A,C).
+	if len(pairs) != 2 {
+		t.Fatalf("expected 2 contradiction pairs, got %d: %v", len(pairs), pairs)
+	}
+
+	type pairKey [32]byte
+	seen := make(map[pairKey]bool)
+	for _, p := range pairs {
+		// Each pair must have canonical order (smaller first).
+		if CompareULIDs(p[0], p[1]) > 0 {
+			t.Errorf("pair not in canonical order: %v > %v", p[0], p[1])
+		}
+		var k pairKey
+		copy(k[:16], p[0][:])
+		copy(k[16:], p[1][:])
+		if seen[k] {
+			t.Errorf("duplicate pair returned: %v", p)
+		}
+		seen[k] = true
+	}
+
+	// Both idA–idB and idA–idC must be present.
+	canonPair := func(a, b ULID) pairKey {
+		if CompareULIDs(a, b) > 0 {
+			a, b = b, a
+		}
+		var k pairKey
+		copy(k[:16], a[:])
+		copy(k[16:], b[:])
+		return k
+	}
+	if !seen[canonPair(idA, idB)] {
+		t.Error("pair (A,B) not found in GetContradictions result")
+	}
+	if !seen[canonPair(idA, idC)] {
+		t.Error("pair (A,C) not found in GetContradictions result")
+	}
+}
+
+
 // newTestStore creates a PebbleStore backed by a temp dir.
 // openTestPebble already registers Cleanup for the DB; we just wrap it in a store.
 func newTestStore(t *testing.T) *PebbleStore {

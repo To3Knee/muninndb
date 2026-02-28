@@ -1734,3 +1734,134 @@ func TestHandleRenameVault_InternalServerError(t *testing.T) {
 		t.Error("expected non-empty error message in response")
 	}
 }
+
+// ── GET /api/engrams/{id} ─────────────────────────────────────────────────────
+
+// TestGetEngram_HappyPath verifies that GET /api/engrams/{id}?vault=default
+// returns 200 with a ReadResponse body.
+func TestGetEngram_HappyPath(t *testing.T) {
+	eng := &MockEngine{}
+	server := NewServer("localhost:8080", eng, nil, nil, nil, EmbedInfo{}, nil, "", nil)
+
+	req := httptest.NewRequest("GET", "/api/engrams/test-id?vault=default", nil)
+	w := httptest.NewRecorder()
+	server.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp ReadResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.ID == "" {
+		t.Error("expected non-empty ID in response")
+	}
+	if resp.Content == "" {
+		t.Error("expected non-empty Content in response")
+	}
+}
+
+// readErrEngine returns an error from Read so the handler falls through to 404.
+type readErrEngine struct{ MockEngine }
+
+func (e *readErrEngine) Read(ctx context.Context, req *ReadRequest) (*ReadResponse, error) {
+	return nil, fmt.Errorf("engram not found")
+}
+
+// TestGetEngram_EngineError verifies that a Read engine error produces a 4xx/5xx response.
+func TestGetEngram_EngineError(t *testing.T) {
+	server := NewServer("localhost:8080", &readErrEngine{}, nil, nil, nil, EmbedInfo{}, nil, "", nil)
+
+	req := httptest.NewRequest("GET", "/api/engrams/missing-id?vault=default", nil)
+	w := httptest.NewRecorder()
+	server.mux.ServeHTTP(w, req)
+
+	// handleGetEngram sends 404 on engine error.
+	if w.Code != http.StatusNotFound && w.Code != http.StatusInternalServerError {
+		t.Errorf("expected 404 or 500, got %d", w.Code)
+	}
+}
+
+// ── GET /api/openapi.yaml ─────────────────────────────────────────────────────
+
+// TestOpenAPISpec_Returns200 verifies the spec endpoint returns 200 with a
+// non-empty body and the correct Content-Type header.
+func TestOpenAPISpec_Returns200(t *testing.T) {
+	eng := &MockEngine{}
+	server := NewServer("localhost:8080", eng, nil, nil, nil, EmbedInfo{}, nil, "", nil)
+
+	req := httptest.NewRequest("GET", "/api/openapi.yaml", nil)
+	w := httptest.NewRecorder()
+	server.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if w.Body.Len() == 0 {
+		t.Error("expected non-empty body for openapi spec")
+	}
+	ct := w.Header().Get("Content-Type")
+	if !strings.Contains(ct, "application/yaml") {
+		t.Errorf("expected Content-Type to contain application/yaml, got %q", ct)
+	}
+}
+
+// TestOpenAPISpec_CacheControl verifies that the Cache-Control header contains "max-age".
+func TestOpenAPISpec_CacheControl(t *testing.T) {
+	eng := &MockEngine{}
+	server := NewServer("localhost:8080", eng, nil, nil, nil, EmbedInfo{}, nil, "", nil)
+
+	req := httptest.NewRequest("GET", "/api/openapi.yaml", nil)
+	w := httptest.NewRecorder()
+	server.mux.ServeHTTP(w, req)
+
+	cc := w.Header().Get("Cache-Control")
+	if !strings.Contains(cc, "max-age") {
+		t.Errorf("expected Cache-Control to contain max-age, got %q", cc)
+	}
+}
+
+// ── GET /api/contradictions ───────────────────────────────────────────────────
+
+// contradictionsErrEngine returns an error from GetContradictions.
+type contradictionsErrEngine struct{ MockEngine }
+
+func (e *contradictionsErrEngine) GetContradictions(ctx context.Context, vault string) (*ContradictionsResponse, error) {
+	return nil, fmt.Errorf("storage error: index unavailable")
+}
+
+// TestContradictions_EngineError verifies that a GetContradictions engine error → 500.
+func TestContradictions_EngineError(t *testing.T) {
+	server := NewServer("localhost:8080", &contradictionsErrEngine{}, nil, nil, nil, EmbedInfo{}, nil, "", nil)
+
+	req := httptest.NewRequest("GET", "/api/contradictions?vault=default", nil)
+	w := httptest.NewRecorder()
+	server.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d", w.Code)
+	}
+}
+
+// ── GET /api/guide ────────────────────────────────────────────────────────────
+
+// guideErrEngine returns an error from GetGuide.
+type guideErrEngine struct{ MockEngine }
+
+func (e *guideErrEngine) GetGuide(ctx context.Context, vault string) (string, error) {
+	return "", fmt.Errorf("guide generation failed")
+}
+
+// TestGuide_EngineError verifies that a GetGuide engine error → 500.
+func TestGuide_EngineError(t *testing.T) {
+	server := NewServer("localhost:8080", &guideErrEngine{}, nil, nil, nil, EmbedInfo{}, nil, "", nil)
+
+	req := httptest.NewRequest("GET", "/api/guide?vault=default", nil)
+	w := httptest.NewRecorder()
+	server.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d", w.Code)
+	}
+}

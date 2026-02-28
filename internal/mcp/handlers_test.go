@@ -720,3 +720,135 @@ func TestHandleRecallProfileOmittedIsEmpty(t *testing.T) {
 		t.Errorf("profile = %q, want empty string when not provided", eng.lastProfile)
 	}
 }
+
+// ── muninn_read ──────────────────────────────────────────────────────────────
+
+// readWithDataEngine returns a populated ReadResponse so shape assertions are meaningful.
+type readWithDataEngine struct{ fakeEngine }
+
+func (e *readWithDataEngine) Read(_ context.Context, req *mbp.ReadRequest) (*mbp.ReadResponse, error) {
+	return &mbp.ReadResponse{
+		ID:      req.ID,
+		Concept: "test concept",
+		Content: "test content body",
+	}, nil
+}
+
+func TestHandleRead_HappyPath(t *testing.T) {
+	srv := newTestServerWith(&readWithDataEngine{})
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_read","arguments":{"vault":"default","id":"abc-123"}}}`
+	w := postRPC(t, srv, body)
+	content := extractInnerJSON(t, decodeResp(t, w.Body.String()))
+
+	// readResponseToMemory maps the response to a Memory with id and content fields.
+	for _, field := range []string{"id", "content"} {
+		if _, ok := content[field]; !ok {
+			t.Errorf("response missing field: %q", field)
+		}
+	}
+	if content["id"] != "abc-123" {
+		t.Errorf("id = %v, want abc-123", content["id"])
+	}
+}
+
+func TestHandleRead_MissingID(t *testing.T) {
+	srv := newTestServer()
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_read","arguments":{"vault":"default"}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error == nil || resp.Error.Code != -32602 {
+		t.Errorf("expected -32602, got %v", resp.Error)
+	}
+}
+
+// ── muninn_forget ────────────────────────────────────────────────────────────
+
+func TestHandleForget_HappyPath(t *testing.T) {
+	srv := newTestServer()
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_forget","arguments":{"vault":"default","id":"abc-123"}}}`
+	w := postRPC(t, srv, body)
+	content := extractInnerJSON(t, decodeResp(t, w.Body.String()))
+
+	ok, _ := content["ok"].(bool)
+	if !ok {
+		t.Errorf("expected ok=true in response, got %v", content["ok"])
+	}
+}
+
+func TestHandleForget_MissingID(t *testing.T) {
+	srv := newTestServer()
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_forget","arguments":{"vault":"default"}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error == nil || resp.Error.Code != -32602 {
+		t.Errorf("expected -32602, got %v", resp.Error)
+	}
+}
+
+// ── muninn_link ──────────────────────────────────────────────────────────────
+
+func TestHandleLink_HappyPath(t *testing.T) {
+	srv := newTestServer()
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_link","arguments":{"vault":"default","source_id":"src-1","target_id":"tgt-1","relation":"supports"}}}`
+	w := postRPC(t, srv, body)
+	content := extractInnerJSON(t, decodeResp(t, w.Body.String()))
+
+	ok, _ := content["ok"].(bool)
+	if !ok {
+		t.Errorf("expected ok=true in response, got %v", content["ok"])
+	}
+}
+
+func TestHandleLink_MissingFields(t *testing.T) {
+	srv := newTestServer()
+	// Missing target_id and relation
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_link","arguments":{"vault":"default","source_id":"src-1"}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error == nil || resp.Error.Code != -32602 {
+		t.Errorf("expected -32602, got %v", resp.Error)
+	}
+}
+
+// ── muninn_contradictions ────────────────────────────────────────────────────
+
+func TestHandleContradictions_HappyPath(t *testing.T) {
+	srv := newTestServer()
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_contradictions","arguments":{"vault":"default"}}}`
+	w := postRPC(t, srv, body)
+	content := extractInnerJSON(t, decodeResp(t, w.Body.String()))
+
+	if _, ok := content["contradictions"]; !ok {
+		t.Error("response missing field: \"contradictions\"")
+	}
+}
+
+// contradictionsErrMCPEngine returns an error from GetContradictions.
+type contradictionsErrMCPEngine struct{ fakeEngine }
+
+func (e *contradictionsErrMCPEngine) GetContradictions(_ context.Context, _ string) ([]ContradictionPair, error) {
+	return nil, fmt.Errorf("index unavailable")
+}
+
+func TestHandleContradictions_EngineError(t *testing.T) {
+	srv := newTestServerWith(&contradictionsErrMCPEngine{})
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_contradictions","arguments":{"vault":"default"}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error == nil || resp.Error.Code != -32000 {
+		t.Errorf("expected -32000 for engine error, got %v", resp.Error)
+	}
+}
+
+// ── muninn_status ────────────────────────────────────────────────────────────
+
+func TestHandleStatus_HappyPath(t *testing.T) {
+	srv := newTestServer()
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_status","arguments":{"vault":"default"}}}`
+	w := postRPC(t, srv, body)
+	content := extractInnerJSON(t, decodeResp(t, w.Body.String()))
+
+	if _, ok := content["total_memories"]; !ok {
+		t.Error("response missing field: \"total_memories\"")
+	}
+}
