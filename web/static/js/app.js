@@ -1479,6 +1479,19 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
+    async reembedVault() {
+      if (!confirm(`Re-embed vault "${this.vault}"?\n\nThis clears all embeddings and lets the RetroactiveProcessor re-embed every engram with the current model.\n\nThe vault stays queryable during migration (with degraded recall).`)) return;
+      try {
+        const r = await this.apiCall('/api/admin/vaults/' + encodeURIComponent(this.vault) + '/reembed', { method: 'POST' });
+        const data = await r.json();
+        this.addNotification('success', `Re-embed started (job ${data.job_id}). Monitor via Embed Status.`);
+        // Refresh embed status to show progress.
+        this.loadEmbedStatus();
+      } catch (e) {
+        this.addNotification('error', 'Re-embed failed: ' + (e?.message || 'unknown error'));
+      }
+    },
+
     // ── Vault actions ──────────────────────────────────────────────────────
     openVaultAction(action) {
       this.vaultActionModal = {

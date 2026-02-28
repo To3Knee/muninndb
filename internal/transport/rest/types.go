@@ -101,6 +101,12 @@ type EngineAPI interface {
 	// the current (Porter2-stemmed) tokenizer. Sets the FTS version marker to 1
 	// upon completion. Returns the number of engrams re-indexed.
 	ReindexFTSVault(ctx context.Context, vaultName string) (int64, error)
+	// StartReembedVault clears stale embeddings and digest flags for the named vault,
+	// allowing the RetroactiveProcessor to re-embed everything with the current model.
+	// Returns a Job immediately (202 pattern).
+	StartReembedVault(ctx context.Context, vaultName, modelName string) (*vaultjob.Job, error)
+	// CountEmbedded returns the number of engrams with the DigestEmbed flag set.
+	CountEmbedded(ctx context.Context) int64
 	// Checkpoint creates a Pebble checkpoint (point-in-time snapshot) at destDir.
 	Checkpoint(destDir string) error
 

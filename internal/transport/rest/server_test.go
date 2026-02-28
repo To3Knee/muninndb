@@ -248,6 +248,14 @@ func (m *MockEngine) GetGuide(ctx context.Context, vault string) (string, error)
 	return "MuninnDB Guide for vault \"default\"\n\nThis vault has 100 memories.", nil
 }
 
+func (m *MockEngine) StartReembedVault(ctx context.Context, vaultName, modelName string) (*vaultjob.Job, error) {
+	return &vaultjob.Job{ID: "mock-reembed-job", Operation: "reembed", Source: vaultName, Target: vaultName}, nil
+}
+
+func (m *MockEngine) CountEmbedded(ctx context.Context) int64 {
+	return 42
+}
+
 // backupMockEngine embeds MockEngine but creates a real Pebble checkpoint so
 // the verification step has something to open.
 type backupMockEngine struct {

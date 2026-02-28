@@ -325,13 +325,15 @@ func (s *Server) handleEmbedStatus(w http.ResponseWriter, r *http.Request) {
 		totalCount = int64(resp.EngramCount)
 	}
 
+	embeddedCount := s.engine.CountEmbedded(r.Context())
+
 	s.sendJSON(w, http.StatusOK, EmbedStatusResponse{
 		Provider:      s.embedProvider,
 		Model:         s.embedModel,
 		Enabled:       s.embedProvider != "" && s.embedProvider != "none",
-		EmbeddedCount: -1, // not tracked per-vault yet
+		EmbeddedCount: embeddedCount,
 		TotalCount:    totalCount,
-		Indexing:      false, // RetroactiveProcessor state not wired to REST yet
+		Indexing:      embeddedCount >= 0 && totalCount >= 0 && embeddedCount < totalCount,
 	})
 }
 
@@ -651,6 +653,47 @@ func (s *Server) handleReindexFTSVault(w http.ResponseWriter, r *http.Request) {
 		"vault":             name,
 		"engrams_reindexed": count,
 	})
+}
+
+// handleReembedVault clears stale embeddings for a vault so the RetroactiveProcessor
+// re-embeds everything with the current model.
+// POST /api/admin/vaults/{name}/reembed
+// Body (optional): {"model": "bge-small-en-v1.5"}
+// Response 202: {"job_id": "..."}
+func (s *Server) handleReembedVault(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "vault name required")
+		return
+	}
+	if !isValidVaultName(name) {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "vault name contains invalid characters")
+		return
+	}
+
+	// Parse optional model from body.
+	model := s.embedModel
+	var req struct {
+		Model string `json:"model"`
+	}
+	if r.Body != nil && r.ContentLength > 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err == nil && req.Model != "" {
+			model = req.Model
+		}
+	}
+
+	job, err := s.engine.StartReembedVault(r.Context(), name, model)
+	if err != nil {
+		if errors.Is(err, engine.ErrVaultNotFound) {
+			s.sendError(r, w, http.StatusNotFound, ErrVaultNotFound, err.Error())
+			return
+		}
+		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]string{"job_id": job.ID})
 }
 
 // handleVaultJobStatus returns the current status of a vault clone/merge job.

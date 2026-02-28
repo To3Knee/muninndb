@@ -847,7 +847,10 @@
                   </template>
                 </div>
               </template>
-              <button class="btn-secondary" style="font-size:0.8125rem;" @click="pluginCfg.embedShowForm=true;pluginCfg.embedCmd=''">Reconfigure</button>
+              <div style="display:flex;gap:0.5rem;margin-top:0.5rem;">
+                <button class="btn-secondary" style="font-size:0.8125rem;" @click="pluginCfg.embedShowForm=true;pluginCfg.embedCmd=''">Reconfigure</button>
+                <button class="btn-secondary" style="font-size:0.8125rem;" @click="reembedVault()">Re-embed vault</button>
+              </div>
             </div>
           </template>
 

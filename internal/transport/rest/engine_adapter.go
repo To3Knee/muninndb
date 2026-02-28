@@ -266,6 +266,10 @@ func (w *RESTEngineWrapper) ReindexFTSVault(ctx context.Context, vaultName strin
 	return w.engine.ReindexFTSVault(ctx, vaultName)
 }
 
+func (w *RESTEngineWrapper) StartReembedVault(ctx context.Context, vaultName, modelName string) (*vaultjob.Job, error) {
+	return w.engine.StartReembedVault(ctx, vaultName, modelName)
+}
+
 func (w *RESTEngineWrapper) Checkpoint(destDir string) error {
 	return w.engine.Checkpoint(destDir)
 }

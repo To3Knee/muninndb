@@ -148,6 +148,14 @@ func (m *mockEngine) GetGuide(ctx context.Context, vault string) (string, error)
 	return "", nil
 }
 
+func (m *mockEngine) StartReembedVault(ctx context.Context, vaultName, modelName string) (*vaultjob.Job, error) {
+	return &vaultjob.Job{ID: "mock-reembed-job", Operation: "reembed", Source: vaultName, Target: vaultName}, nil
+}
+
+func (m *mockEngine) CountEmbedded(ctx context.Context) int64 {
+	return 0
+}
+
 func makeMockFS() fs.FS {
 	return fstest.MapFS{
 		"static/dist/app.css":   &fstest.MapFile{Data: []byte("/* css */")},

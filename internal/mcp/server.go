@@ -152,9 +152,9 @@ func (s *MCPServer) dispatchToolCall(ctx context.Context, w http.ResponseWriter,
 		args = make(map[string]any)
 	}
 
-	vault, ok := vaultFromArgs(args)
-	if !ok {
-		sendError(w, req.ID, -32602, "invalid params: 'vault' is required (use 'default' for the default vault)")
+	vault, errMsg := resolveVault(nil, args)
+	if errMsg != "" {
+		sendError(w, req.ID, -32602, "invalid params: "+errMsg)
 		return
 	}
 

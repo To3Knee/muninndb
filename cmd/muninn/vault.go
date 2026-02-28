@@ -26,6 +26,7 @@ func printVaultUsage() {
 	fmt.Println("  export      --vault <name> [--output <file>] [--reset-metadata]  Export vault to .muninn archive")
 	fmt.Println("  import      <file> --vault <name> [--reset-metadata]             Import .muninn archive into new vault")
 	fmt.Println("  reindex-fts <name>                               Rebuild FTS index with Porter2 stemming")
+	fmt.Println("  reembed     <name>                               Clear embeddings and re-embed with current model")
 	fmt.Println("  recall-mode <vault> [mode]                        Get or set default recall mode")
 	fmt.Println()
 	fmt.Println("Auth flags (MySQL-style, optional):")
@@ -59,7 +60,7 @@ func runVault(args []string) {
 
 	// Validate the subcommand before authenticating so typos get fast feedback.
 	switch sub {
-	case "delete", "clear", "clone", "merge", "export", "import", "reindex-fts", "recall-mode":
+	case "delete", "clear", "clone", "merge", "export", "import", "reindex-fts", "reembed", "recall-mode":
 	default:
 		fmt.Printf("Unknown vault command: %q\n", sub)
 		printVaultUsage()
@@ -89,6 +90,8 @@ func runVault(args []string) {
 		runVaultImport(subArgs)
 	case "reindex-fts":
 		runVaultReindexFTS(subArgs)
+	case "reembed":
+		runVaultReembed(subArgs)
 	case "recall-mode":
 		runVaultRecallMode(subArgs)
 	}
@@ -467,6 +470,62 @@ func runVaultReindexFTS(args []string) {
 	default:
 		printHTTPError(resp)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// vault reembed
+// ---------------------------------------------------------------------------
+
+func runVaultReembed(args []string) {
+	var vaultName string
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") && vaultName == "" {
+			vaultName = a
+		}
+	}
+	if vaultName == "" {
+		fmt.Println("Usage: muninn vault reembed <vault-name>")
+		fmt.Println("  Clears stale embeddings and lets the RetroactiveProcessor")
+		fmt.Println("  re-embed every engram with the current embedding model.")
+		fmt.Println("  The vault stays queryable during migration (degraded recall).")
+		return
+	}
+
+	fmt.Printf("Re-embedding vault %q...\n", vaultName)
+
+	reqURL := fmt.Sprintf("%s/api/admin/vaults/%s/reembed", vaultAdminBase, url.PathEscape(vaultName))
+	client := &http.Client{Timeout: 30 * time.Second}
+	req, err := http.NewRequest("POST", reqURL, nil)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+	addSessionCookie(req)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Printf("Error connecting to MuninnDB: %v\n", err)
+		fmt.Println("Is muninn running? Try: muninn status")
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusAccepted {
+		printHTTPError(resp)
+		return
+	}
+
+	var result struct {
+		JobID string `json:"job_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || result.JobID == "" {
+		fmt.Println("  Error: could not read job ID from response.")
+		return
+	}
+
+	pollProgressBar(result.JobID, vaultName)
+	fmt.Println("  Embedding flags cleared. RetroactiveProcessor will re-embed in the background.")
+	fmt.Println("  Monitor progress: GET /api/admin/embed/status")
 }
 
 // ---------------------------------------------------------------------------

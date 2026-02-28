@@ -197,6 +197,7 @@ func NewServer(addr string, engine EngineAPI, authStore *auth.Store, sessionSecr
 	mux.HandleFunc("GET /api/admin/vaults/{name}/export", s.withAdminMiddleware(s.handleExportVault))
 	mux.HandleFunc("POST /api/admin/vaults/import", s.withAdminMiddleware(s.withLargeBody(s.handleImportVault)))
 	mux.HandleFunc("POST /api/admin/vaults/{name}/reindex-fts", s.withAdminMiddleware(s.handleReindexFTSVault))
+	mux.HandleFunc("POST /api/admin/vaults/{name}/reembed", s.withAdminMiddleware(s.handleReembedVault))
 	mux.HandleFunc("POST /api/admin/backup", s.withAdminMiddleware(s.handleBackup))
 
 	// Cluster management — session auth required
