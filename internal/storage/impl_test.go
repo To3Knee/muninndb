@@ -880,3 +880,259 @@ func TestReadCoherenceMissReturnsNotFound(t *testing.T) {
 		t.Error("ReadCoherence on missing key returned ok=true, want false")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// WriteEngramBatch tests
+// ---------------------------------------------------------------------------
+
+// TestWriteEngramBatch_MultiItem batch-writes 3 engrams and verifies all are
+// retrievable via GetEngram.
+func TestWriteEngramBatch_MultiItem(t *testing.T) {
+	store := newTestStore(t)
+
+	ctx := context.Background()
+	ws := store.VaultPrefix("batch-multi")
+
+	engrams := []*Engram{
+		{Concept: "alpha", Content: "first content"},
+		{Concept: "beta", Content: "second content"},
+		{Concept: "gamma", Content: "third content"},
+	}
+
+	items := make([]EngramBatchItem, len(engrams))
+	for i, e := range engrams {
+		items[i] = EngramBatchItem{WSPrefix: ws, Engram: e}
+	}
+
+	ids, errs := store.WriteEngramBatch(ctx, items)
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("WriteEngramBatch item[%d]: %v", i, err)
+		}
+	}
+	if len(ids) != 3 {
+		t.Fatalf("expected 3 IDs, got %d", len(ids))
+	}
+
+	for i, id := range ids {
+		got, err := store.GetEngram(ctx, ws, id)
+		if err != nil {
+			t.Fatalf("GetEngram[%d]: %v", i, err)
+		}
+		if got.Concept != engrams[i].Concept {
+			t.Errorf("item[%d] Concept: got %q, want %q", i, got.Concept, engrams[i].Concept)
+		}
+		if got.Content != engrams[i].Content {
+			t.Errorf("item[%d] Content: got %q, want %q", i, got.Content, engrams[i].Content)
+		}
+	}
+}
+
+// TestWriteEngramBatch_EmptyInput verifies that an empty batch is a no-op with
+// no error and returns empty slices.
+func TestWriteEngramBatch_EmptyInput(t *testing.T) {
+	store := newTestStore(t)
+
+	ctx := context.Background()
+	ids, errs := store.WriteEngramBatch(ctx, []EngramBatchItem{})
+	if len(ids) != 0 {
+		t.Errorf("expected 0 IDs, got %d", len(ids))
+	}
+	if len(errs) != 0 {
+		t.Errorf("expected 0 errors, got %d", len(errs))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CacheLen / GetDB / DiskSize trivial accessors
+// ---------------------------------------------------------------------------
+
+// TestStoreCacheLen writes 3 engrams to the L1 cache (via GetEngram which
+// populates the cache) and verifies CacheLen() > 0.
+func TestStoreCacheLen(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("cachelen-vault")
+
+	// Write 3 engrams, then read them back so they land in the L1 cache.
+	for i := 0; i < 3; i++ {
+		id, err := store.WriteEngram(ctx, ws, &Engram{
+			Concept: "concept",
+			Content: "content",
+		})
+		if err != nil {
+			t.Fatalf("WriteEngram[%d]: %v", i, err)
+		}
+		// GetEngram populates the L1 cache.
+		if _, err := store.GetEngram(ctx, ws, id); err != nil {
+			t.Fatalf("GetEngram[%d]: %v", i, err)
+		}
+	}
+
+	if store.CacheLen() <= 0 {
+		t.Errorf("expected CacheLen > 0 after 3 reads, got %d", store.CacheLen())
+	}
+}
+
+// TestGetDB verifies that GetDB returns the non-nil Pebble instance.
+func TestGetDB(t *testing.T) {
+	store := newTestStore(t)
+	if store.GetDB() == nil {
+		t.Error("expected GetDB() to return non-nil *pebble.DB")
+	}
+}
+
+// TestDiskSize verifies that DiskSize() returns > 0 after writing some engrams.
+func TestDiskSize(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("disksize-vault")
+
+	for i := 0; i < 3; i++ {
+		if _, err := store.WriteEngram(ctx, ws, &Engram{
+			Concept: "concept",
+			Content: "some content to occupy disk space",
+		}); err != nil {
+			t.Fatalf("WriteEngram[%d]: %v", i, err)
+		}
+	}
+
+	if store.DiskSize() <= 0 {
+		t.Errorf("expected DiskSize > 0 after writes, got %d", store.DiskSize())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ContextWithSnapshot
+// ---------------------------------------------------------------------------
+
+// TestContextWithSnapshot verifies that ContextWithSnapshot embeds a value in
+// the context (the value is retrievable via pebbleReader).
+func TestContextWithSnapshot(t *testing.T) {
+	store := newTestStore(t)
+
+	snap := store.NewSnapshot()
+	defer snap.Close()
+
+	ctx := context.Background()
+	ctxWithSnap := ContextWithSnapshot(ctx, snap)
+
+	// The context must contain a value — pebbleReader should return the snapshot.
+	reader := store.pebbleReader(ctxWithSnap)
+	if reader == nil {
+		t.Error("expected pebbleReader to return non-nil reader when snapshot is in ctx")
+	}
+	// Verify it really used the snapshot (not the live DB) by checking type.
+	if reader == store.GetDB() {
+		t.Error("expected pebbleReader to return the snapshot, not the live DB")
+	}
+
+	// Without snapshot in ctx, pebbleReader should fall back to the live DB.
+	liveReader := store.pebbleReader(ctx)
+	if liveReader != store.GetDB() {
+		t.Error("expected pebbleReader to return the live DB when no snapshot in ctx")
+	}
+}
+
+// TestWriteEngramBatch_VaultCountIncrement verifies that the vault count
+// increases by exactly the batch size after WriteEngramBatch.
+func TestWriteEngramBatch_VaultCountIncrement(t *testing.T) {
+	store := newTestStore(t)
+
+	ctx := context.Background()
+	ws := store.VaultPrefix("batch-count")
+
+	countBefore := store.GetVaultCount(ctx, ws)
+
+	const batchSize = 3
+	items := make([]EngramBatchItem, batchSize)
+	for i := range items {
+		items[i] = EngramBatchItem{
+			WSPrefix: ws,
+			Engram:   &Engram{Concept: "c", Content: "x"},
+		}
+	}
+
+	_, errs := store.WriteEngramBatch(ctx, items)
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("WriteEngramBatch item[%d]: %v", i, err)
+		}
+	}
+
+	countAfter := store.GetVaultCount(ctx, ws)
+	if countAfter-countBefore != batchSize {
+		t.Errorf("vault count increment: got %d, want %d", countAfter-countBefore, batchSize)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// BatchSet / BatchDelete (pebble.go package-level helpers)
+// ---------------------------------------------------------------------------
+
+// TestBatchSet verifies that BatchSet adds a Set operation to a batch that is
+// later committed and the value is readable from Pebble.
+func TestBatchSet(t *testing.T) {
+	db := openTestPebble(t)
+
+	key := []byte("test-batchset-key")
+	value := []byte("hello from BatchSet")
+
+	batch := db.NewBatch()
+	BatchSet(batch, key, value)
+	if err := batch.Commit(nil); err != nil {
+		batch.Close()
+		t.Fatalf("batch.Commit: %v", err)
+	}
+	batch.Close()
+
+	got, err := Get(db, key)
+	if err != nil {
+		t.Fatalf("Get after BatchSet: %v", err)
+	}
+	if string(got) != string(value) {
+		t.Errorf("BatchSet: got value %q, want %q", got, value)
+	}
+}
+
+// TestBatchDelete verifies that BatchDelete adds a Delete operation to a batch;
+// after commit the key is no longer present in Pebble.
+func TestBatchDelete(t *testing.T) {
+	db := openTestPebble(t)
+
+	key := []byte("test-batchdelete-key")
+	value := []byte("to be deleted")
+
+	// Write the key first.
+	setBatch := db.NewBatch()
+	BatchSet(setBatch, key, value)
+	if err := setBatch.Commit(nil); err != nil {
+		setBatch.Close()
+		t.Fatalf("initial batch.Commit: %v", err)
+	}
+	setBatch.Close()
+
+	// Confirm it exists.
+	before, err := Get(db, key)
+	if err != nil || before == nil {
+		t.Fatalf("Get before BatchDelete: err=%v, value=%v", err, before)
+	}
+
+	// Delete via BatchDelete.
+	delBatch := db.NewBatch()
+	BatchDelete(delBatch, key)
+	if err := delBatch.Commit(nil); err != nil {
+		delBatch.Close()
+		t.Fatalf("delete batch.Commit: %v", err)
+	}
+	delBatch.Close()
+
+	// Confirm the key is gone.
+	after, err := Get(db, key)
+	if err != nil {
+		t.Fatalf("Get after BatchDelete: %v", err)
+	}
+	if after != nil {
+		t.Errorf("BatchDelete: key still present after delete, value=%q", after)
+	}
+}

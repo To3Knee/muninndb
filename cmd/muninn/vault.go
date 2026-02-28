@@ -18,6 +18,7 @@ func printVaultUsage() {
 	fmt.Println("Usage: muninn vault <command> [flags]")
 	fmt.Println()
 	fmt.Println("Commands:")
+	fmt.Println("  create      <name> [--public]                    Create and register a new vault")
 	fmt.Println("  list        [--pattern <glob>]                   List all vaults")
 	fmt.Println("  delete      <name> [--yes] [--force]             Delete a vault and all its memories")
 	fmt.Println("  clear       <name> [--yes] [--force]             Remove all memories from a vault")
@@ -26,6 +27,9 @@ func printVaultUsage() {
 	fmt.Println("  export      --vault <name> [--output <file>] [--reset-metadata]  Export vault to .muninn archive")
 	fmt.Println("  import      <file> --vault <name> [--reset-metadata]             Import .muninn archive into new vault")
 	fmt.Println("  reindex-fts <name>                               Rebuild FTS index with Porter2 stemming")
+	fmt.Println("  rename      <old-name> <new-name>                  Rename a vault (metadata only)")
+	fmt.Println("  reembed     <name>                               Clear embeddings and re-embed with current model")
+	fmt.Println("  recall-mode <vault> [mode]                        Get or set default recall mode")
 	fmt.Println()
 	fmt.Println("Auth flags (MySQL-style, optional):")
 	fmt.Println("  -u <user>         Admin username (default: root)")
@@ -58,7 +62,7 @@ func runVault(args []string) {
 
 	// Validate the subcommand before authenticating so typos get fast feedback.
 	switch sub {
-	case "delete", "clear", "clone", "merge", "export", "import", "reindex-fts":
+	case "create", "delete", "clear", "clone", "merge", "rename", "export", "import", "reindex-fts", "reembed", "recall-mode":
 	default:
 		fmt.Printf("Unknown vault command: %q\n", sub)
 		printVaultUsage()
@@ -74,12 +78,16 @@ func runVault(args []string) {
 	}
 
 	switch sub {
+	case "create":
+		runVaultCreate(subArgs)
 	case "delete":
 		runVaultDelete(subArgs)
 	case "clear":
 		runVaultClear(subArgs)
 	case "clone":
 		runVaultClone(subArgs)
+	case "rename":
+		runVaultRename(subArgs)
 	case "merge":
 		runVaultMerge(subArgs)
 	case "export":
@@ -88,6 +96,76 @@ func runVault(args []string) {
 		runVaultImport(subArgs)
 	case "reindex-fts":
 		runVaultReindexFTS(subArgs)
+	case "reembed":
+		runVaultReembed(subArgs)
+	case "recall-mode":
+		runVaultRecallMode(subArgs)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// vault create
+// ---------------------------------------------------------------------------
+
+func runVaultCreate(args []string) {
+	var name string
+	var public bool
+
+	for _, a := range args {
+		switch a {
+		case "--public":
+			public = true
+		default:
+			if !strings.HasPrefix(a, "-") && name == "" {
+				name = a
+			}
+		}
+	}
+
+	if name == "" {
+		fmt.Println("Usage: muninn vault create <vault-name> [--public]")
+		fmt.Println()
+		fmt.Println("  Registers a new vault in the auth store.")
+		fmt.Println("  By default the vault is locked (API key required). Use --public to allow open access.")
+		fmt.Println("  The vault will appear in 'muninn vault list' immediately after creation.")
+		return
+	}
+
+	bodyBytes, err := json.Marshal(map[string]any{"name": name, "public": public})
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequest("PUT",
+		fmt.Sprintf("%s/api/admin/vaults/config", vaultAdminBase),
+		bytes.NewReader(bodyBytes))
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	addSessionCookie(req)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Printf("Error connecting to MuninnDB: %v\n", err)
+		fmt.Println("Is muninn running? Try: muninn status")
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		printHTTPError(resp)
+		return
+	}
+
+	fmt.Printf("  Vault %q created.\n", name)
+	if public {
+		fmt.Println("  Access: public (no API key required)")
+	} else {
+		fmt.Println("  Access: locked (API key required — use 'muninn api-key create' to generate one)")
 	}
 }
 
@@ -318,6 +396,50 @@ func runVaultClone(args []string) {
 }
 
 // ---------------------------------------------------------------------------
+// vault rename
+// ---------------------------------------------------------------------------
+
+func runVaultRename(args []string) {
+	if len(args) < 2 {
+		fmt.Println("Usage: muninn vault rename <old-name> <new-name>")
+		return
+	}
+	oldName := args[0]
+	newName := args[1]
+
+	bodyBytes, err := json.Marshal(map[string]any{"new_name": newName})
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+	req, err := http.NewRequest("POST",
+		fmt.Sprintf("%s/api/admin/vaults/%s/rename", vaultAdminBase, url.PathEscape(oldName)),
+		bytes.NewReader(bodyBytes))
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	addSessionCookie(req)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Printf("Error connecting to MuninnDB: %v\n", err)
+		fmt.Println("Is muninn running? Try: muninn status")
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		printHTTPError(resp)
+		return
+	}
+
+	fmt.Printf("  Vault renamed from %q to %q.\n", oldName, newName)
+}
+
+// ---------------------------------------------------------------------------
 // vault merge
 // ---------------------------------------------------------------------------
 
@@ -464,6 +586,62 @@ func runVaultReindexFTS(args []string) {
 	default:
 		printHTTPError(resp)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// vault reembed
+// ---------------------------------------------------------------------------
+
+func runVaultReembed(args []string) {
+	var vaultName string
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") && vaultName == "" {
+			vaultName = a
+		}
+	}
+	if vaultName == "" {
+		fmt.Println("Usage: muninn vault reembed <vault-name>")
+		fmt.Println("  Clears stale embeddings and lets the RetroactiveProcessor")
+		fmt.Println("  re-embed every engram with the current embedding model.")
+		fmt.Println("  The vault stays queryable during migration (degraded recall).")
+		return
+	}
+
+	fmt.Printf("Re-embedding vault %q...\n", vaultName)
+
+	reqURL := fmt.Sprintf("%s/api/admin/vaults/%s/reembed", vaultAdminBase, url.PathEscape(vaultName))
+	client := &http.Client{Timeout: 30 * time.Second}
+	req, err := http.NewRequest("POST", reqURL, nil)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+	addSessionCookie(req)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Printf("Error connecting to MuninnDB: %v\n", err)
+		fmt.Println("Is muninn running? Try: muninn status")
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusAccepted {
+		printHTTPError(resp)
+		return
+	}
+
+	var result struct {
+		JobID string `json:"job_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || result.JobID == "" {
+		fmt.Println("  Error: could not read job ID from response.")
+		return
+	}
+
+	pollProgressBar(result.JobID, vaultName)
+	fmt.Println("  Embedding flags cleared. RetroactiveProcessor will re-embed in the background.")
+	fmt.Println("  Monitor progress: GET /api/admin/embed/status")
 }
 
 // ---------------------------------------------------------------------------
@@ -756,4 +934,137 @@ func runVaultImport(args []string) {
 	}
 
 	pollProgressBar(result.JobID, vaultName)
+}
+
+// ---------------------------------------------------------------------------
+// vault recall-mode
+// ---------------------------------------------------------------------------
+
+func runVaultRecallMode(args []string) {
+	if len(args) == 0 {
+		fmt.Println("Usage: muninn vault recall-mode <vault> [mode]")
+		fmt.Println()
+		fmt.Println("  With one argument, prints the vault's default recall mode.")
+		fmt.Println("  With two arguments, sets the vault's default recall mode.")
+		fmt.Println()
+		fmt.Println("  Valid modes: semantic, recent, balanced, deep")
+		return
+	}
+
+	vaultName := args[0]
+	plasticityURL := fmt.Sprintf("%s/api/admin/vault/%s/plasticity", vaultAdminBase, url.PathEscape(vaultName))
+
+	if len(args) == 1 {
+		// GET current recall mode
+		client := &http.Client{Timeout: 5 * time.Second}
+		req, err := http.NewRequest("GET", plasticityURL, nil)
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+			return
+		}
+		addSessionCookie(req)
+		resp, err := client.Do(req)
+		if err != nil {
+			fmt.Printf("Error connecting to MuninnDB: %v\n", err)
+			fmt.Println("Is muninn running? Try: muninn status")
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			printHTTPError(resp)
+			return
+		}
+
+		var data struct {
+			Resolved struct {
+				RecallMode string `json:"recall_mode"`
+			} `json:"resolved"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+			fmt.Printf("Error parsing response: %v\n", err)
+			return
+		}
+		mode := data.Resolved.RecallMode
+		if mode == "" {
+			mode = "balanced"
+		}
+		fmt.Printf("  Vault %q recall mode: %s\n", vaultName, mode)
+		return
+	}
+
+	// SET recall mode
+	newMode := args[1]
+	validModes := map[string]bool{"semantic": true, "recent": true, "balanced": true, "deep": true}
+	if !validModes[newMode] {
+		fmt.Printf("Error: invalid recall mode %q (valid: semantic, recent, balanced, deep)\n", newMode)
+		return
+	}
+
+	// GET current plasticity config
+	client := &http.Client{Timeout: 5 * time.Second}
+	getReq, err := http.NewRequest("GET", plasticityURL, nil)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+	addSessionCookie(getReq)
+	getResp, err := client.Do(getReq)
+	if err != nil {
+		fmt.Printf("Error connecting to MuninnDB: %v\n", err)
+		return
+	}
+	defer getResp.Body.Close()
+
+	if getResp.StatusCode != http.StatusOK {
+		printHTTPError(getResp)
+		return
+	}
+
+	var data struct {
+		Config json.RawMessage `json:"config"`
+	}
+	if err := json.NewDecoder(getResp.Body).Decode(&data); err != nil {
+		fmt.Printf("Error parsing response: %v\n", err)
+		return
+	}
+
+	// Merge recall_mode into existing config
+	var cfgMap map[string]any
+	if data.Config != nil && string(data.Config) != "null" {
+		if err := json.Unmarshal(data.Config, &cfgMap); err != nil {
+			cfgMap = map[string]any{}
+		}
+	} else {
+		cfgMap = map[string]any{}
+	}
+	cfgMap["recall_mode"] = newMode
+
+	bodyBytes, err := json.Marshal(cfgMap)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+
+	putReq, err := http.NewRequest("PUT", plasticityURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+	putReq.Header.Set("Content-Type", "application/json")
+	addSessionCookie(putReq)
+
+	putResp, err := client.Do(putReq)
+	if err != nil {
+		fmt.Printf("Error connecting to MuninnDB: %v\n", err)
+		return
+	}
+	defer putResp.Body.Close()
+
+	if putResp.StatusCode != http.StatusOK {
+		printHTTPError(putResp)
+		return
+	}
+
+	fmt.Printf("  Vault %q recall mode set to: %s\n", vaultName, newMode)
 }

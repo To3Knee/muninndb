@@ -257,11 +257,13 @@ func runToolMultiSelect(tools []toolChoice) []string {
 	}
 
 	cursor := 0
-	totalLines := len(tools) + 2
+	totalLines := len(tools) + 2 // tools + blank + hint
 
 	render := func(first bool) {
 		if !first {
-			fmt.Printf("\r\033[%dA", totalLines)
+			// Move to column 0, then up totalLines-1 lines (hint line has no trailing newline,
+			// so cursor is ON the last line, not below it).
+			fmt.Printf("\033[%dA\r", totalLines-1)
 		}
 		for i, t := range tools {
 			arrow := "  "
@@ -276,10 +278,10 @@ func runToolMultiSelect(tools []toolChoice) []string {
 			if t.detected && t.configPath != "" {
 				suffix = "  \033[2mdetected\033[0m"
 			}
-			fmt.Printf("\r\033[K    %s%s  %s%s\r\n", arrow, check, t.displayName, suffix)
+			fmt.Printf("\033[K    %s%s  %s%s\r\n", arrow, check, t.displayName, suffix)
 		}
-		fmt.Print("\r\033[K\r\n")
-		fmt.Print("\r\033[K  \033[2m↑/↓ navigate  ·  space select  ·  enter confirm\033[0m")
+		fmt.Print("\033[K\r\n")
+		fmt.Print("\033[K  \033[2m↑/↓ navigate  ·  space select  ·  enter confirm\033[0m")
 	}
 
 	render(true)
@@ -296,7 +298,7 @@ func runToolMultiSelect(tools []toolChoice) []string {
 		case n == 1 && buf[0] == ' ':
 			tools[cursor].selected = !tools[cursor].selected
 		case n == 1 && (buf[0] == '\r' || buf[0] == '\n'):
-			fmt.Printf("\r\033[%dA", totalLines)
+			fmt.Printf("\033[%dA\r", totalLines-1)
 			for i, t := range tools {
 				check := "○"
 				if t.selected {
@@ -310,10 +312,10 @@ func runToolMultiSelect(tools []toolChoice) []string {
 				if i == cursor {
 					sel = "▸ "
 				}
-				fmt.Printf("\r\033[K    %s%s  %s%s\r\n", sel, check, t.displayName, suffix)
+				fmt.Printf("\033[K    %s%s  %s%s\r\n", sel, check, t.displayName, suffix)
 			}
-			fmt.Print("\r\033[K\r\n")
-			fmt.Print("\r\033[K")
+			fmt.Print("\033[K\r\n")
+			fmt.Print("\033[K")
 			term.Restore(fd, oldState)
 
 			var keys []string
@@ -429,17 +431,17 @@ func runSingleSelect(options []selectOption, defaultIdx int) int {
 
 	render := func(first bool) {
 		if !first {
-			fmt.Printf("\r\033[%dA", totalLines)
+			fmt.Printf("\033[%dA\r", totalLines-1)
 		}
 		for i, o := range options {
 			arrow := "     "
 			if i == cursor {
 				arrow = "  ▸  "
 			}
-			fmt.Printf("\r\033[K  %s%d)  %-18s·  %s\r\n", arrow, i+1, o.label, o.hint)
+			fmt.Printf("\033[K  %s%d)  %-18s·  %s\r\n", arrow, i+1, o.label, o.hint)
 		}
-		fmt.Print("\r\033[K\r\n")
-		fmt.Print("\r\033[K  \033[2m↑/↓ navigate  ·  enter confirm\033[0m")
+		fmt.Print("\033[K\r\n")
+		fmt.Print("\033[K  \033[2m↑/↓ navigate  ·  enter confirm\033[0m")
 	}
 
 	render(true)
@@ -453,16 +455,16 @@ func runSingleSelect(options []selectOption, defaultIdx int) int {
 
 		switch {
 		case n == 1 && (buf[0] == '\r' || buf[0] == '\n'):
-			fmt.Printf("\r\033[%dA", totalLines)
+			fmt.Printf("\033[%dA\r", totalLines-1)
 			for i, o := range options {
 				arrow := "     "
 				if i == cursor {
 					arrow = "  ▸  "
 				}
-				fmt.Printf("\r\033[K  %s%d)  %-18s·  %s\r\n", arrow, i+1, o.label, o.hint)
+				fmt.Printf("\033[K  %s%d)  %-18s·  %s\r\n", arrow, i+1, o.label, o.hint)
 			}
-			fmt.Print("\r\033[K\r\n")
-			fmt.Print("\r\033[K")
+			fmt.Print("\033[K\r\n")
+			fmt.Print("\033[K")
 			term.Restore(fd, oldState)
 			return cursor
 		case n == 1 && buf[0] == 3: // Ctrl+C

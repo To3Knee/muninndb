@@ -2,6 +2,7 @@ package rest
 
 import (
 	"context"
+	"crypto/tls"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -55,6 +56,7 @@ type Server struct {
 	corsOrigins   []string // allowed CORS origins; nil = no cross-origin allowed
 	mux           *http.ServeMux
 	server        *http.Server
+	tlsConfig     *tls.Config // nil = plain TCP
 
 	// Embedder info — set at construction time, static for the lifetime of the server.
 	embedProvider string // "ollama", "openai", "voyage", or "none"
@@ -105,7 +107,7 @@ type MCPInfo struct {
 //
 // sessionSecret is used to validate admin session cookies on /api/admin/* routes.
 // corsOrigins is the set of allowed CORS origins; nil disables cross-origin access.
-func NewServer(addr string, engine EngineAPI, authStore *auth.Store, sessionSecret []byte, corsOrigins []string, embedInfo EmbedInfo, pluginRegistry *plugin.Registry, dataDir string, mcpInfo ...MCPInfo) *Server {
+func NewServer(addr string, engine EngineAPI, authStore *auth.Store, sessionSecret []byte, corsOrigins []string, embedInfo EmbedInfo, pluginRegistry *plugin.Registry, dataDir string, tlsConfig *tls.Config, mcpInfo ...MCPInfo) *Server {
 	mux := http.NewServeMux()
 	s := &Server{
 		addr:           addr,
@@ -118,6 +120,7 @@ func NewServer(addr string, engine EngineAPI, authStore *auth.Store, sessionSecr
 		embedModel:     embedInfo.Model,
 		pluginRegistry: pluginRegistry,
 		dataDir:        dataDir,
+		tlsConfig:      tlsConfig,
 		startTime:      time.Now(),
 		shutdown:       make(chan struct{}),
 		ready:          make(chan struct{}),
@@ -143,6 +146,7 @@ func NewServer(addr string, engine EngineAPI, authStore *auth.Store, sessionSecr
 	mux.HandleFunc("GET /v1/cluster/cognitive/consistency", s.withClusterAuthMiddleware(s.withPublicMiddleware(s.handleCognitiveConsistency)))
 
 	// Public routes — no auth, no body size limit (health/auth handshake).
+	mux.HandleFunc("GET /api/openapi.yaml", s.withPublicMiddleware(s.handleOpenAPISpec))
 	mux.HandleFunc("POST /api/hello", s.withPublicMiddleware(s.handleHello))
 	mux.HandleFunc("GET /api/health", s.withPublicMiddleware(s.handleHealth))
 	mux.HandleFunc("GET /api/ready", s.withPublicMiddleware(s.handleReady))
@@ -171,6 +175,7 @@ func NewServer(addr string, engine EngineAPI, authStore *auth.Store, sessionSecr
 	mux.HandleFunc("POST /api/traverse", s.withMiddleware(s.handleTraverse))
 	mux.HandleFunc("POST /api/explain", s.withMiddleware(s.handleExplain))
 	mux.HandleFunc("PUT /api/engrams/{id}/state", s.withMiddleware(s.handleSetState))
+	mux.HandleFunc("PUT /api/engrams/{id}/tags", s.withMiddleware(s.handleUpdateTags))
 	mux.HandleFunc("GET /api/deleted", s.withMiddleware(s.handleListDeleted))
 	mux.HandleFunc("POST /api/engrams/{id}/retry-enrich", s.withMiddleware(s.handleRetryEnrich))
 	mux.HandleFunc("GET /api/contradictions", s.withMiddleware(s.handleContradictions))
@@ -197,7 +202,10 @@ func NewServer(addr string, engine EngineAPI, authStore *auth.Store, sessionSecr
 	mux.HandleFunc("GET /api/admin/vaults/{name}/export", s.withAdminMiddleware(s.handleExportVault))
 	mux.HandleFunc("POST /api/admin/vaults/import", s.withAdminMiddleware(s.withLargeBody(s.handleImportVault)))
 	mux.HandleFunc("POST /api/admin/vaults/{name}/reindex-fts", s.withAdminMiddleware(s.handleReindexFTSVault))
+	mux.HandleFunc("POST /api/admin/vaults/{name}/reembed", s.withAdminMiddleware(s.handleReembedVault))
+	mux.HandleFunc("POST /api/admin/vaults/{name}/rename", s.withAdminMiddleware(s.handleRenameVault))
 	mux.HandleFunc("POST /api/admin/backup", s.withAdminMiddleware(s.handleBackup))
+	mux.HandleFunc("GET /api/admin/observability", s.withAdminMiddleware(s.handleObservability))
 
 	// Cluster management — session auth required
 	mux.HandleFunc("GET /api/admin/cluster/token", s.withAdminMiddleware(s.handleAdminClusterToken))
@@ -345,6 +353,10 @@ func (s *Server) Serve(ctx context.Context) error {
 	listener, err := net.Listen("tcp", s.addr)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", s.addr, err)
+	}
+	if s.tlsConfig != nil {
+		listener = tls.NewListener(listener, s.tlsConfig)
+		slog.Info("rest: TLS enabled", "addr", listener.Addr().String())
 	}
 	slog.Info("rest: listening", "addr", listener.Addr().String())
 
@@ -622,6 +634,13 @@ func (s *Server) handleDeleteEngram(w http.ResponseWriter, r *http.Request) {
 	s.sendJSON(w, http.StatusOK, resp)
 }
 
+// activateTimeout is read once at startup from MUNINN_ACTIVATE_TIMEOUT (seconds).
+// Default: 30s. The context deadline ensures deep BFS traversals cannot run unbounded.
+var activateTimeout = func() time.Duration {
+	secs := envIntDefault("MUNINN_ACTIVATE_TIMEOUT", 30)
+	return time.Duration(secs) * time.Second
+}()
+
 func (s *Server) handleActivate(w http.ResponseWriter, r *http.Request) {
 	var req ActivateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -631,12 +650,58 @@ func (s *Server) handleActivate(w http.ResponseWriter, r *http.Request) {
 	if req.Vault == "" {
 		req.Vault = ctxVault(r)
 	}
-	resp, err := s.engine.Activate(r.Context(), &req)
+	// Apply recall mode preset if provided.
+	if req.Mode != "" {
+		preset, err := auth.LookupRecallMode(req.Mode)
+		if err != nil {
+			s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, err.Error())
+			return
+		}
+		applyRecallModePreset(&req, preset)
+	}
+	// Apply a hard activation timeout so deep BFS traversals on large vaults
+	// cannot run unbounded. MUNINN_ACTIVATE_TIMEOUT (default 30s) is capped
+	// to the outer WriteTimeout so we never wait longer than the HTTP server allows.
+	ctx, cancel := context.WithTimeout(r.Context(), activateTimeout)
+	defer cancel()
+	resp, err := s.engine.Activate(ctx, &req)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			s.sendError(r, w, http.StatusGatewayTimeout, ErrIndexError, "activation timeout: query took too long")
+			return
+		}
 		s.sendError(r, w, http.StatusInternalServerError, ErrIndexError, err.Error())
 		return
 	}
 	s.sendJSON(w, http.StatusOK, resp)
+}
+
+// applyRecallModePreset applies non-zero recall mode preset fields to an ActivateRequest,
+// only when the caller has not already set the corresponding field.
+func applyRecallModePreset(req *ActivateRequest, preset auth.RecallModePreset) {
+	if preset.Threshold > 0 && req.Threshold == 0 {
+		req.Threshold = preset.Threshold
+	}
+	if preset.MaxHops > 0 && req.MaxHops == 0 {
+		req.MaxHops = preset.MaxHops
+	}
+	if preset.SemanticSimilarity > 0 || preset.FullTextRelevance > 0 || preset.Recency > 0 || preset.DisableACTR {
+		if req.Weights == nil {
+			req.Weights = &mbp.Weights{}
+		}
+		if preset.SemanticSimilarity > 0 && req.Weights.SemanticSimilarity == 0 {
+			req.Weights.SemanticSimilarity = preset.SemanticSimilarity
+		}
+		if preset.FullTextRelevance > 0 && req.Weights.FullTextRelevance == 0 {
+			req.Weights.FullTextRelevance = preset.FullTextRelevance
+		}
+		if preset.Recency > 0 && req.Weights.Recency == 0 {
+			req.Weights.Recency = preset.Recency
+		}
+		if preset.DisableACTR {
+			req.Weights.DisableACTR = true
+		}
+	}
 }
 
 func (s *Server) handleLink(w http.ResponseWriter, r *http.Request) {
@@ -923,16 +988,56 @@ func (s *Server) withClusterAuthMiddleware(next http.HandlerFunc) http.HandlerFu
 }
 
 func (s *Server) handleListEngrams(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
 	vault := ctxVault(r)
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+
+	limit, _ := strconv.Atoi(q.Get("limit"))
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
-	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	offset, _ := strconv.Atoi(q.Get("offset"))
 	if offset < 0 {
 		offset = 0
 	}
-	resp, err := s.engine.ListEngrams(r.Context(), &ListEngramsRequest{Vault: vault, Limit: limit, Offset: offset})
+
+	sortBy := q.Get("sort") // "created" or "accessed"
+
+	var tags []string
+	if raw := q.Get("tags"); raw != "" {
+		for _, t := range strings.Split(raw, ",") {
+			if t = strings.TrimSpace(t); t != "" {
+				tags = append(tags, t)
+			}
+		}
+	}
+
+	state := q.Get("state")
+
+	var minConf, maxConf float64
+	if v := q.Get("min_confidence"); v != "" {
+		minConf, _ = strconv.ParseFloat(v, 32)
+	}
+	if v := q.Get("max_confidence"); v != "" {
+		maxConf, _ = strconv.ParseFloat(v, 32)
+	}
+
+	since := q.Get("since")
+	before := q.Get("before")
+
+	req := &ListEngramsRequest{
+		Vault:   vault,
+		Limit:   limit,
+		Offset:  offset,
+		Sort:    sortBy,
+		Tags:    tags,
+		State:   state,
+		MinConf: float32(minConf),
+		MaxConf: float32(maxConf),
+		Since:   since,
+		Before:  before,
+	}
+
+	resp, err := s.engine.ListEngrams(r.Context(), req)
 	if err != nil {
 		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
 		return
@@ -1169,6 +1274,34 @@ func (s *Server) handleSetState(w http.ResponseWriter, r *http.Request) {
 		ID:      id,
 		State:   body.State,
 		Updated: true,
+	})
+}
+
+func (s *Server) handleUpdateTags(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "missing engram id")
+		return
+	}
+	var body UpdateTagsRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid request body")
+		return
+	}
+	vault := body.Vault
+	if vault == "" {
+		vault = ctxVault(r)
+	}
+	if body.Tags == nil {
+		body.Tags = []string{}
+	}
+	if err := s.engine.UpdateTags(r.Context(), vault, id, body.Tags); err != nil {
+		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
+		return
+	}
+	s.sendJSON(w, http.StatusOK, UpdateTagsResponse{
+		ID:   id,
+		Tags: body.Tags,
 	})
 }
 

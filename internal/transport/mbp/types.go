@@ -116,6 +116,9 @@ type ReadResponse struct {
 	MemoryType     uint8    `msgpack:"memory_type,omitempty"`
 	TypeLabel      string   `msgpack:"type_label,omitempty"`
 	Classification uint16   `msgpack:"classification,omitempty"`
+	// EmbedDim is the stored embedding dimensionality code (0 = no embedding).
+	// 1 = 384-dim, 2 = 768-dim, 3 = 1536-dim.
+	EmbedDim uint8 `msgpack:"embed_dim,omitempty" json:"embed_dim,omitempty"`
 }
 
 // ActivateRequest queries for relevant engrams.
@@ -132,6 +135,7 @@ type ActivateRequest struct {
 	BriefMode   string    `msgpack:"brief_mode,omitempty"`                       // "extractive"|"llm"|"auto"|"" (default: "auto")
 	DisableHops bool      `msgpack:"disable_hops,omitempty"`                     // when true, override default hop traversal to 0
 	Profile     string    `json:"profile,omitempty" msgpack:"profile,omitempty"` // traversal profile override: ""|"default"|"causal"|"confirmatory"|"adversarial"|"structural"
+	Mode        string    `json:"mode,omitempty" msgpack:"mode,omitempty"`       // recall mode preset: "semantic"|"recent"|"balanced"|"deep"
 }
 
 // Weights defines scoring weight distribution.
@@ -151,8 +155,9 @@ type Weights struct {
 	CGDNPower float32 `msgpack:"cgdn_power,omitempty"` // divisive normalization power (default 2.0)
 	// ACT-R: total recall mode. Score = ContentMatch × softplus(B(M) + scale×Hebbian).
 	UseACTR      bool    `msgpack:"use_actr,omitempty"`
-	ACTRDecay    float32 `msgpack:"actr_decay,omitempty"`     // power-law exponent d (default 0.5)
-	ACTRHebScale float32 `msgpack:"actr_heb_scale,omitempty"` // Hebbian amplifier (default 4.0)
+	ACTRDecay    float32 `msgpack:"actr_decay,omitempty"`      // power-law exponent d (default 0.5)
+	ACTRHebScale float32 `msgpack:"actr_heb_scale,omitempty"`  // Hebbian amplifier (default 4.0)
+	DisableACTR  bool    `msgpack:"disable_actr,omitempty" json:"disable_actr,omitempty"` // when true, use legacy weighted-sum scoring instead of ACT-R
 }
 
 // Filter restricts activation results.

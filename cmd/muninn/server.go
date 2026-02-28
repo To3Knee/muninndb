@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/scrypster/muninndb/internal/auth"
+	"github.com/scrypster/muninndb/internal/backup"
 	"github.com/scrypster/muninndb/internal/cognitive"
 	plugincfg "github.com/scrypster/muninndb/internal/config"
 	"github.com/scrypster/muninndb/internal/engine"
@@ -31,6 +33,7 @@ import (
 	"github.com/scrypster/muninndb/internal/logging"
 	"github.com/scrypster/muninndb/internal/mcp"
 	"github.com/scrypster/muninndb/internal/metrics"
+	"github.com/scrypster/muninndb/internal/metrics/latency"
 	"github.com/scrypster/muninndb/internal/storage/migrate"
 	"github.com/scrypster/muninndb/internal/plugin"
 	embedpkg "github.com/scrypster/muninndb/internal/plugin/embed"
@@ -122,7 +125,7 @@ func resolveEmbedInfo(cfg plugincfg.PluginConfig) rest.EmbedInfo {
 	}
 	// Bundled local embedder: on by default. Opt out with MUNINN_LOCAL_EMBED=0.
 	if os.Getenv("MUNINN_LOCAL_EMBED") != "0" && embedpkg.LocalAvailable() {
-		return rest.EmbedInfo{Provider: "local", Model: "all-MiniLM-L6-v2"}
+		return rest.EmbedInfo{Provider: "local", Model: "bge-small-en-v1.5"}
 	}
 	return rest.EmbedInfo{Provider: "none", Model: ""}
 }
@@ -442,6 +445,11 @@ func runServer() {
 	metricsAddr := flag.String("metrics-addr", "", "Prometheus /metrics listen address (empty = disabled)")
 	mcpToken := flag.String("mcp-token", "", "Bearer token for MCP auth (empty = no auth)")
 	dev := flag.Bool("dev", false, "serve web assets from ./web directory (development mode)")
+	backupInterval := flag.String("backup-interval", "", "Automated backup interval (e.g. 6h, 30m); empty = disabled")
+	backupDir := flag.String("backup-dir", "", "Directory to write automated backups into")
+	backupRetain := flag.Int("backup-retain", 5, "Number of automated backups to keep")
+	tlsCert := flag.String("tls-cert", "", "Path to TLS certificate file (PEM)")
+	tlsKey  := flag.String("tls-key",  "", "Path to TLS private key file (PEM)")
 	var logLevelStr string
 	flag.StringVar(&logLevelStr, "log-level", "info", "Log level: debug, info, warn, error")
 	flag.Usage = func() {
@@ -463,8 +471,62 @@ func runServer() {
 		fmt.Fprintf(os.Stderr, "  MUNINN_GC_PERCENT            Go GC target percentage (default: 200)\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_RATE_LIMIT_GLOBAL_RPS Global rate limit requests/sec (default: 1000)\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_RATE_LIMIT_PER_IP_RPS Per-IP rate limit requests/sec (default: 100)\n")
+		fmt.Fprintf(os.Stderr, "  MUNINN_BACKUP_INTERVAL        Automated backup interval (e.g. 6h, 30m); empty = disabled\n")
+		fmt.Fprintf(os.Stderr, "  MUNINN_BACKUP_DIR             Directory to write automated backups into\n")
+		fmt.Fprintf(os.Stderr, "  MUNINN_BACKUP_RETAIN          Number of automated backups to keep (default: 5)\n")
 	}
 	flag.Parse()
+
+	// TLS env fallbacks — flags take priority; env vars are the fallback.
+	if *tlsCert == "" { *tlsCert = os.Getenv("MUNINN_TLS_CERT") }
+	if *tlsKey == "" { *tlsKey = os.Getenv("MUNINN_TLS_KEY") }
+
+	// Backup env fallbacks — flags take priority; env vars are the fallback.
+	if *backupInterval == "" { *backupInterval = os.Getenv("MUNINN_BACKUP_INTERVAL") }
+	if *backupDir == "" { *backupDir = os.Getenv("MUNINN_BACKUP_DIR") }
+	if *backupRetain == 5 {
+		if s := os.Getenv("MUNINN_BACKUP_RETAIN"); s != "" {
+			if n, err := strconv.Atoi(s); err == nil && n > 0 {
+				*backupRetain = n
+			}
+		}
+	}
+
+	// Parse and validate backup configuration.
+	var backupIntervalDur time.Duration
+	if *backupInterval != "" {
+		d, err := time.ParseDuration(*backupInterval)
+		if err != nil {
+			slog.Error("invalid --backup-interval", "value", *backupInterval, "err", err)
+			os.Exit(1)
+		}
+		backupIntervalDur = d
+	}
+	if (backupIntervalDur > 0) != (*backupDir != "") {
+		slog.Error("backup: --backup-interval and --backup-dir must both be set or both be empty")
+		os.Exit(1)
+	}
+
+	// Validate: both cert and key must be provided together, or neither.
+	if (*tlsCert == "") != (*tlsKey == "") {
+		slog.Error("tls: --tls-cert and --tls-key must both be set (or neither)")
+		os.Exit(1)
+	}
+
+	// Load TLS configuration if cert/key pair is provided.
+	var clientTLS *tls.Config
+	if *tlsCert != "" {
+		cert, err := tls.LoadX509KeyPair(*tlsCert, *tlsKey)
+		if err != nil {
+			slog.Error("tls: failed to load certificate", "cert", *tlsCert, "err", err)
+			os.Exit(1)
+		}
+		clientTLS = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
+		}
+		slog.Info("tls: client-facing TLS enabled", "cert", *tlsCert)
+	}
 
 	// Validate address flags early so misconfigurations are caught before any
 	// resources are allocated. metricsAddr is optional (empty = disabled).
@@ -673,6 +735,9 @@ func runServer() {
 
 	eng.SetTransitionWorker(transitionWorkerImpl)
 
+	latTracker := latency.New()
+	eng.SetLatencyTracker(latTracker)
+
 	// Wire cluster role change callbacks now that the engine exists.
 	if coordinator != nil {
 		hebbianStore := cognitive.NewHebbianStoreAdapter(store)
@@ -736,9 +801,9 @@ func runServer() {
 	}
 
 	// Build transport servers
-	mbpServer := mbp.NewServer(*mbpAddr, eng, authStore)
+	mbpServer := mbp.NewServer(*mbpAddr, eng, authStore, clientTLS)
 	corsOrigins := parseCORSOrigins(os.Getenv("MUNINN_CORS_ORIGINS"))
-	restServer := rest.NewServer(*restAddr, restWrapper, authStore, sessionSecret, corsOrigins, embedInfo, pluginRegistry, *dataDir, rest.MCPInfo{
+	restServer := rest.NewServer(*restAddr, restWrapper, authStore, sessionSecret, corsOrigins, embedInfo, pluginRegistry, *dataDir, clientTLS, rest.MCPInfo{
 		Addr:     *mcpAddr,
 		HasToken: *mcpToken != "",
 	})
@@ -746,11 +811,11 @@ func runServer() {
 
 	// Build MCP server
 	mcpAdapter := mcp.NewEngineAdapter(eng, enrichPlugin)
-	mcpServer := mcp.New(*mcpAddr, mcpAdapter, *mcpToken)
+	mcpServer := mcp.New(*mcpAddr, mcpAdapter, *mcpToken, clientTLS)
 
 	// Build gRPC server
 	grpcAdapter := grpcpkg.NewEngineAdapter(eng)
-	grpcServer := grpcpkg.NewServer(*grpcAddr, grpcAdapter, authStore)
+	grpcServer := grpcpkg.NewServer(*grpcAddr, grpcAdapter, authStore, clientTLS)
 
 	// Signal handling
 	ctx, cancel := context.WithCancel(context.Background())
@@ -860,6 +925,13 @@ func runServer() {
 		slog.Info("retroactive embed processor started")
 	}
 
+	// Wire processors into engine for observability stats.
+	var obsProcs []*plugin.RetroactiveProcessor
+	if retroProcessor != nil {
+		obsProcs = append(obsProcs, retroProcessor)
+	}
+	eng.SetRetroactiveProcessors(obsProcs...)
+
 	// Start servers
 	errCh := make(chan error, 3)
 
@@ -892,7 +964,7 @@ func runServer() {
 	}()
 
 	// Start UI server
-	uiSrv, err := ui.NewServer(webFS, restWrapper, restServer.Handler(), authStore, sessionSecret, ring)
+	uiSrv, err := ui.NewServer(webFS, restWrapper, restServer.Handler(), authStore, sessionSecret, ring, clientTLS)
 	if err != nil {
 		slog.Error("create ui server", "err", err)
 		os.Exit(1)
@@ -927,6 +999,22 @@ func runServer() {
 	}
 
 	slog.Info("MuninnDB started")
+
+	// Start automated backup scheduler if both interval and directory are configured.
+	if backupIntervalDur > 0 && *backupDir != "" {
+		sched := backup.New(backup.Config{
+			Interval:  backupIntervalDur,
+			BackupDir: *backupDir,
+			Retain:    *backupRetain,
+			DataDir:   *dataDir,
+		}, eng)
+		sched.Start(ctx)
+		slog.Info("backup scheduler started",
+			"interval", backupIntervalDur,
+			"dir", *backupDir,
+			"retain", *backupRetain,
+		)
+	}
 
 	select {
 	case <-ctx.Done():

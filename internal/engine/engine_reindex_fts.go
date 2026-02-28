@@ -53,7 +53,7 @@ func (e *Engine) ReindexFTSVault(ctx context.Context, vaultName string) (int64, 
 	//                   0x08 (FTS global stats), 0x09 (per-term stats).
 	db := e.store.GetDB()
 
-	wsPlus, err := incrementWSBytes(ws)
+	wsPlus, err := keys.IncrementWSPrefix(ws)
 	if err != nil {
 		return 0, fmt.Errorf("reindex-fts: increment ws: %w", err)
 	}
@@ -109,15 +109,3 @@ func (e *Engine) ReindexFTSVault(ctx context.Context, vaultName string) (int64, 
 	return indexed, nil
 }
 
-// incrementWSBytes returns the next workspace prefix for use as an exclusive
-// upper bound in Pebble range operations.
-func incrementWSBytes(ws [8]byte) ([8]byte, error) {
-	result := ws
-	for i := 7; i >= 0; i-- {
-		result[i]++
-		if result[i] != 0 {
-			return result, nil
-		}
-	}
-	return [8]byte{}, fmt.Errorf("workspace prefix overflow")
-}

@@ -49,9 +49,10 @@ func isValidVaultName(name string) bool {
 func (s *Server) handleCreateAPIKey(authStore *auth.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Vault string `json:"vault"`
-			Label string `json:"label"`
-			Mode  string `json:"mode"`
+			Vault   string `json:"vault"`
+			Label   string `json:"label"`
+			Mode    string `json:"mode"`
+			Expires string `json:"expires"` // optional: duration like "90d", "1y", or RFC3339 date
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid request body")
@@ -72,7 +73,16 @@ func (s *Server) handleCreateAPIKey(authStore *auth.Store) http.HandlerFunc {
 			s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "mode must be 'full' or 'observe'")
 			return
 		}
-		token, key, err := authStore.GenerateAPIKey(req.Vault, req.Label, req.Mode)
+		var expiresAt *time.Time
+		if req.Expires != "" {
+			t, err := parseKeyExpiry(req.Expires)
+			if err != nil {
+				s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid expires: "+err.Error())
+				return
+			}
+			expiresAt = &t
+		}
+		token, key, err := authStore.GenerateAPIKey(req.Vault, req.Label, req.Mode, expiresAt)
 		if err != nil {
 			s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, err.Error())
 			return
@@ -82,6 +92,46 @@ func (s *Server) handleCreateAPIKey(authStore *auth.Store) http.HandlerFunc {
 			"key":   key,
 		})
 	}
+}
+
+// parseKeyExpiry parses an expiry specification into an absolute time.
+// Accepted formats:
+//   - Nd  — N days from now (e.g. "90d")
+//   - Ny  — N years from now (e.g. "1y")
+//   - RFC3339 date/datetime string (e.g. "2027-01-01" or "2027-01-01T00:00:00Z")
+func parseKeyExpiry(s string) (time.Time, error) {
+	now := time.Now()
+	if len(s) >= 2 {
+		unit := s[len(s)-1]
+		numStr := s[:len(s)-1]
+		switch unit {
+		case 'd', 'D':
+			var n int
+			if _, err := fmt.Sscanf(numStr, "%d", &n); err == nil && n > 0 {
+				return now.AddDate(0, 0, n), nil
+			}
+		case 'y', 'Y':
+			var n int
+			if _, err := fmt.Sscanf(numStr, "%d", &n); err == nil && n > 0 {
+				return now.AddDate(n, 0, 0), nil
+			}
+		}
+	}
+	// Try RFC3339 datetime.
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		if t.Before(now) {
+			return time.Time{}, fmt.Errorf("expiry date is in the past")
+		}
+		return t, nil
+	}
+	// Try date-only (YYYY-MM-DD).
+	if t, err := time.Parse("2006-01-02", s); err == nil {
+		if t.Before(now) {
+			return time.Time{}, fmt.Errorf("expiry date is in the past")
+		}
+		return t, nil
+	}
+	return time.Time{}, fmt.Errorf("use Nd, Ny, or RFC3339 date (e.g. '90d', '1y', '2027-01-01')")
 }
 
 func (s *Server) handleListAPIKeys(authStore *auth.Store) http.HandlerFunc {
@@ -237,6 +287,13 @@ func (s *Server) handlePutVaultPlasticity(as *auth.Store) http.HandlerFunc {
 				return
 			}
 		}
+		if cfg.RecallMode != nil && *cfg.RecallMode != "" {
+			if !auth.ValidRecallMode(*cfg.RecallMode) {
+				s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram,
+					fmt.Sprintf("invalid recall_mode %q: valid values are semantic, recent, balanced, deep", *cfg.RecallMode))
+				return
+			}
+		}
 		preset := cfg.Preset
 		if preset == "" {
 			preset = "default"
@@ -318,13 +375,15 @@ func (s *Server) handleEmbedStatus(w http.ResponseWriter, r *http.Request) {
 		totalCount = int64(resp.EngramCount)
 	}
 
+	embeddedCount := s.engine.CountEmbedded(r.Context())
+
 	s.sendJSON(w, http.StatusOK, EmbedStatusResponse{
 		Provider:      s.embedProvider,
 		Model:         s.embedModel,
 		Enabled:       s.embedProvider != "" && s.embedProvider != "none",
-		EmbeddedCount: -1, // not tracked per-vault yet
+		EmbeddedCount: embeddedCount,
 		TotalCount:    totalCount,
-		Indexing:      false, // RetroactiveProcessor state not wired to REST yet
+		Indexing:      embeddedCount >= 0 && totalCount >= 0 && embeddedCount < totalCount,
 	})
 }
 
@@ -395,6 +454,57 @@ func (s *Server) handlePutPluginConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.sendJSON(w, http.StatusOK, cfg)
+}
+
+// handleRenameVault renames a vault (metadata-only, no engram data changes).
+// POST /api/admin/vaults/{name}/rename
+// Body: {"new_name": "new-vault-name"}
+// Response 200: {"old_name": "...", "new_name": "..."}
+func (s *Server) handleRenameVault(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "vault name required")
+		return
+	}
+	if !isValidVaultName(name) {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "vault name contains invalid characters")
+		return
+	}
+	var req struct {
+		NewName string `json:"new_name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.NewName == "" {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "new_name required in body")
+		return
+	}
+	if !isValidVaultName(req.NewName) {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "new_name must be 1–64 lowercase alphanumeric characters, hyphens, or underscores")
+		return
+	}
+	if req.NewName == name {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "new_name must differ from current name")
+		return
+	}
+	if err := s.engine.RenameVault(r.Context(), name, req.NewName); err != nil {
+		if errors.Is(err, engine.ErrVaultNotFound) {
+			s.sendError(r, w, http.StatusNotFound, ErrVaultNotFound, err.Error())
+			return
+		}
+		if errors.Is(err, engine.ErrVaultJobActive) {
+			s.sendError(r, w, http.StatusConflict, ErrVaultForbidden, err.Error())
+			return
+		}
+		if errors.Is(err, engine.ErrVaultNameCollision) {
+			s.sendError(r, w, http.StatusConflict, ErrVaultForbidden, err.Error())
+			return
+		}
+		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
+		return
+	}
+	s.sendJSON(w, http.StatusOK, map[string]string{
+		"old_name": name,
+		"new_name": req.NewName,
+	})
 }
 
 // handleDeleteVault deletes a vault and all its data.
@@ -488,6 +598,10 @@ func (s *Server) handleCloneVault(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, engine.ErrVaultNotFound) {
 			s.sendError(r, w, http.StatusNotFound, ErrVaultNotFound, err.Error())
+			return
+		}
+		if errors.Is(err, engine.ErrVaultNameCollision) {
+			s.sendError(r, w, http.StatusConflict, ErrVaultForbidden, err.Error())
 			return
 		}
 		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
@@ -607,6 +721,10 @@ func (s *Server) handleImportVault(w http.ResponseWriter, r *http.Request) {
 			s.sendError(r, w, http.StatusNotFound, ErrVaultNotFound, err.Error())
 			return
 		}
+		if errors.Is(err, engine.ErrVaultNameCollision) {
+			s.sendError(r, w, http.StatusConflict, ErrVaultForbidden, err.Error())
+			return
+		}
 		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
 		return
 	}
@@ -644,6 +762,47 @@ func (s *Server) handleReindexFTSVault(w http.ResponseWriter, r *http.Request) {
 		"vault":             name,
 		"engrams_reindexed": count,
 	})
+}
+
+// handleReembedVault clears stale embeddings for a vault so the RetroactiveProcessor
+// re-embeds everything with the current model.
+// POST /api/admin/vaults/{name}/reembed
+// Body (optional): {"model": "bge-small-en-v1.5"}
+// Response 202: {"job_id": "..."}
+func (s *Server) handleReembedVault(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "vault name required")
+		return
+	}
+	if !isValidVaultName(name) {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "vault name contains invalid characters")
+		return
+	}
+
+	// Parse optional model from body.
+	model := s.embedModel
+	var req struct {
+		Model string `json:"model"`
+	}
+	if r.Body != nil && r.ContentLength > 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err == nil && req.Model != "" {
+			model = req.Model
+		}
+	}
+
+	job, err := s.engine.StartReembedVault(r.Context(), name, model)
+	if err != nil {
+		if errors.Is(err, engine.ErrVaultNotFound) {
+			s.sendError(r, w, http.StatusNotFound, ErrVaultNotFound, err.Error())
+			return
+		}
+		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]string{"job_id": job.ID})
 }
 
 // handleVaultJobStatus returns the current status of a vault clone/merge job.

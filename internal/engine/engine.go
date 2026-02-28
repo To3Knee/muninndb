@@ -27,6 +27,8 @@ import (
 	"github.com/scrypster/muninndb/internal/index/fts"
 	"github.com/scrypster/muninndb/internal/index/hnsw"
 	"github.com/scrypster/muninndb/internal/metrics"
+	"github.com/scrypster/muninndb/internal/metrics/latency"
+	"github.com/scrypster/muninndb/internal/plugin"
 	"github.com/scrypster/muninndb/internal/scoring"
 	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
@@ -78,6 +80,14 @@ type Engine struct {
 	// Stored as atomic.Value to allow safe concurrent reads without a mutex.
 	onWrite atomic.Value // stores func()
 
+	// latencyTracker records per-vault per-operation latency samples.
+	// nil-safe — callers check before recording.
+	latencyTracker *latency.Tracker
+
+	// retroProcessors holds references to background processors (embed, enrich)
+	// so Observability() can report their stats. Set via SetRetroactiveProcessors.
+	retroProcessors []*plugin.RetroactiveProcessor
+
 	// noveltyJobsDropped counts novelty jobs silently dropped because the channel was full.
 	noveltyJobsDropped atomic.Int64
 
@@ -103,6 +113,34 @@ type Engine struct {
 // Safe to call concurrently with Write.
 func (e *Engine) SetOnWrite(fn func()) {
 	e.onWrite.Store(fn)
+}
+
+// SetLatencyTracker configures the per-vault latency tracker.
+// Must be called before the engine starts serving requests (not safe for concurrent use with Write/Activate/Read).
+func (e *Engine) SetLatencyTracker(t *latency.Tracker) {
+	e.latencyTracker = t
+}
+
+// SetRetroactiveProcessors registers background processors for observability.
+// Must be called before the engine starts serving requests (not safe for concurrent use with Observability).
+func (e *Engine) SetRetroactiveProcessors(procs ...*plugin.RetroactiveProcessor) {
+	e.retroProcessors = procs
+}
+
+// GetProcessorStats returns stats for all registered retroactive processors.
+func (e *Engine) GetProcessorStats() []plugin.RetroactiveStats {
+	stats := make([]plugin.RetroactiveStats, 0, len(e.retroProcessors))
+	for _, p := range e.retroProcessors {
+		if p != nil {
+			stats = append(stats, p.Stats())
+		}
+	}
+	return stats
+}
+
+// LatencyTracker returns the latency tracker (may be nil).
+func (e *Engine) LatencyTracker() *latency.Tracker {
+	return e.latencyTracker
 }
 
 // fastQueryID returns a unique query identifier without crypto/rand overhead.
@@ -408,6 +446,7 @@ func (e *Engine) Hello(ctx context.Context, req *mbp.HelloRequest) (*mbp.HelloRe
 
 // Write implements mbp.EngineAPI.Write.
 func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteResponse, error) {
+	writeStart := time.Now()
 	wsPrefix := e.store.ResolveVaultPrefix(req.Vault)
 	e.activity.Record(wsPrefix)
 
@@ -646,6 +685,12 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	}
 
 	metrics.EngineWritesTotal.Inc()
+
+	d := time.Since(writeStart)
+	if e.latencyTracker != nil {
+		e.latencyTracker.Record(wsPrefix, "write", d)
+	}
+	metrics.WriteDuration.WithLabelValues(vaultName).Observe(d.Seconds())
 
 	return &mbp.WriteResponse{
 		ID:        id.String(),
@@ -928,6 +973,7 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 
 // Read implements mbp.EngineAPI.Read.
 func (e *Engine) Read(ctx context.Context, req *mbp.ReadRequest) (*mbp.ReadResponse, error) {
+	readStart := time.Now()
 	wsPrefix := e.store.ResolveVaultPrefix(req.Vault)
 
 	id, err := storage.ParseULID(req.ID)
@@ -939,6 +985,12 @@ func (e *Engine) Read(ctx context.Context, req *mbp.ReadRequest) (*mbp.ReadRespo
 	if err != nil {
 		return nil, fmt.Errorf("get engram: %w", err)
 	}
+
+	d := time.Since(readStart)
+	if e.latencyTracker != nil {
+		e.latencyTracker.Record(wsPrefix, "read", d)
+	}
+	metrics.ReadDuration.WithLabelValues(req.Vault).Observe(d.Seconds())
 
 	return &mbp.ReadResponse{
 		ID:             eng.ID.String(),
@@ -958,6 +1010,7 @@ func (e *Engine) Read(ctx context.Context, req *mbp.ReadRequest) (*mbp.ReadRespo
 		MemoryType:     uint8(eng.MemoryType),
 		TypeLabel:      eng.TypeLabel,
 		Classification: eng.Classification,
+		EmbedDim:       uint8(eng.EmbedDim),
 	}, nil
 }
 
@@ -980,6 +1033,7 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	snap := e.store.NewSnapshot()
 	defer snap.Close()
 	ctx = storage.ContextWithSnapshot(ctx, snap)
+	activateStart := time.Now()
 
 	// Resolve per-vault Plasticity config. nil authStore means use defaults (tests, bench).
 	var resolved auth.ResolvedPlasticity
@@ -1055,7 +1109,8 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 			CGDNAlpha:          req.Weights.CGDNAlpha,
 			CGDNBeta:           req.Weights.CGDNBeta,
 			CGDNPower:          req.Weights.CGDNPower,
-			UseACTR:            true, // only path for now; legacy temporal code kept for possible future use
+			UseACTR:            !req.Weights.DisableACTR,
+			DisableACTR:        req.Weights.DisableACTR,
 			ACTRDecay:          req.Weights.ACTRDecay,
 			ACTRHebScale:       req.Weights.ACTRHebScale,
 		}
@@ -1090,6 +1145,39 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// Gate CGDN behind vault's ExperimentalCGDN flag.
 	if actReq.Weights.UseCGDN && !resolved.ExperimentalCGDN {
 		actReq.Weights.UseCGDN = false
+	}
+
+	// Apply vault default recall mode when no explicit mode was set by the caller.
+	// When a caller explicitly sets Mode on the request, the REST handler or MCP handler
+	// already applied the preset; the engine only applies the vault default when Mode is empty.
+	if req.Mode == "" && resolved.RecallMode != "" && resolved.RecallMode != "balanced" {
+		preset, mErr := auth.LookupRecallMode(resolved.RecallMode)
+		if mErr == nil {
+			if preset.Threshold > 0 && req.Threshold == 0 {
+				actReq.Threshold = float64(preset.Threshold)
+			}
+			if preset.MaxHops > 0 && req.MaxHops == 0 {
+				actReq.HopDepth = preset.MaxHops
+			}
+			if preset.SemanticSimilarity > 0 || preset.FullTextRelevance > 0 || preset.Recency > 0 || preset.DisableACTR {
+				w := actReq.Weights
+				if w != nil {
+					if preset.SemanticSimilarity > 0 && w.SemanticSimilarity == 0 {
+						w.SemanticSimilarity = preset.SemanticSimilarity
+					}
+					if preset.FullTextRelevance > 0 && w.FullTextRelevance == 0 {
+						w.FullTextRelevance = preset.FullTextRelevance
+					}
+					if preset.Recency > 0 && w.Recency == 0 {
+						w.Recency = preset.Recency
+					}
+					if preset.DisableACTR {
+						w.DisableACTR = true
+						w.UseACTR = false
+					}
+				}
+			}
+		}
 	}
 
 	// Convert filters if provided
@@ -1264,6 +1352,12 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 			}
 		}
 	}
+
+	d := time.Since(activateStart)
+	if e.latencyTracker != nil {
+		e.latencyTracker.Record(wsPrefix, "activate", d)
+	}
+	metrics.ActivateDuration.WithLabelValues(req.Vault).Observe(d.Seconds())
 
 	return &mbp.ActivateResponse{
 		QueryID:     e.fastQueryID(),

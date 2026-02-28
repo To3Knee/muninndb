@@ -57,6 +57,39 @@ func (s *Store) SetVaultConfig(cfg VaultConfig) error {
 	return s.db.Set(vaultConfigKey(cfg.Name), data, pebble.Sync)
 }
 
+// RenameVaultConfig moves a vault's config from oldName to newName.
+// If no config exists for oldName, this is a no-op (returns nil).
+func (s *Store) RenameVaultConfig(oldName, newName string) error {
+	cfg, err := s.GetVaultConfig(oldName)
+	if err != nil {
+		return nil // no config → no-op
+	}
+	// Check if config was explicitly stored (not the fail-closed default).
+	_, closer, getErr := s.db.Get(vaultConfigKey(oldName))
+	if getErr != nil {
+		return nil // no persisted config → no-op
+	}
+	closer.Close()
+
+	cfg.Name = newName
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("rename vault config: marshal: %w", err)
+	}
+
+	// Atomic batch: write new key + delete old key in a single commit.
+	// Prevents duplicate config entries if the process crashes mid-operation.
+	batch := s.db.NewBatch()
+	batch.Set(vaultConfigKey(newName), data, nil)
+	batch.Delete(vaultConfigKey(oldName), nil)
+	if err := batch.Commit(pebble.Sync); err != nil {
+		batch.Close()
+		return fmt.Errorf("rename vault config: commit: %w", err)
+	}
+	batch.Close()
+	return nil
+}
+
 // ListVaultConfigs returns all explicitly configured vaults.
 func (s *Store) ListVaultConfigs() ([]VaultConfig, error) {
 	lower := []byte{prefixVaultCfg}

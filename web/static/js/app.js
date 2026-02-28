@@ -23,12 +23,38 @@ document.addEventListener('alpine:init', () => {
     memories: [],
     totalMemories: 0,
     searchQuery: '',
+    searchMode: 'balanced',
     page: 0,
     memoriesLoading: false,
+    memoryFilters: { sort: 'created', tags: '', state: '', minConf: 0, maxConf: 0 },
     selectedMemory: null,
     showNewMemoryModal: false,
     newMemoryForm: { concept: '', content: '', tagsRaw: '', confidence: 0.8 },
     confirmForgetId: null,
+
+    // Edit/Evolve
+    editingMemory: false,
+    editMemoryForm: { content: '', reason: '' },
+    editMemorySaving: false,
+
+    // Tag editing
+    editingTags: false,
+    editTagsValue: '',
+    editTagsSaving: false,
+
+    // Link modal
+    linkModal: { show: false, sourceId: '', targetId: '', relType: 5, weight: 0.8 },
+
+    // Explain modal
+    explainModal: { show: false, data: null, loading: false },
+
+    // Multi-select / consolidate
+    multiSelectMode: false,
+    selectedMemoryIds: [],
+    consolidateModal: { show: false, mergedContent: '' },
+
+    // Decide modal
+    decideModal: { show: false, decision: '', rationale: '', alternatives: '', evidenceIds: '' },
 
     // Graph
     graphLoaded: false,
@@ -104,6 +130,21 @@ document.addEventListener('alpine:init', () => {
     changePassError: '',
     changePassSuccess: false,
 
+    // Observability
+    obs: null,
+    _obsInterval: null,
+
+    // Contradictions
+    contradictions: [],
+    contradictionsLoaded: false,
+    memoriesSubTab: 'list', // 'list' | 'contradictions'
+
+    // Backup
+    backupLoading: false,
+
+    // Keyboard shortcuts help
+    showShortcutsHelp: false,
+
     // Settings
     settingsTab: 'connect', // 'connect' | 'vault' | 'plugins' | 'keys' | 'admin'
     embedStatus: null,       // loaded from GET /api/admin/embed/status
@@ -128,6 +169,7 @@ document.addEventListener('alpine:init', () => {
       ftsWeight: null,
       relevanceFloor: null,
       temporalHalflife: null,
+      recallMode: 'balanced',
     },
     plasticitySaving: false,
     plasticitySaveOk: false,
@@ -158,8 +200,11 @@ document.addEventListener('alpine:init', () => {
     vaultActionModal: { show: false, action: '', vault: '', confirmText: '', memCount: 0 },
     cloneModal: { show: false, source: '', newName: '' },
     mergeModal: { show: false, source: '', target: '', deleteSource: false },
+    importModal: { show: false, vaultName: '', file: null, resetMeta: false },
     activeJob: null,
     jobPollInterval: null,
+    vaultExporting: false,
+    reindexing: false,
 
     // Sidebar
     sidebarExpanded: localStorage.getItem('muninnSidebar') === 'expanded',
@@ -198,6 +243,43 @@ document.addEventListener('alpine:init', () => {
       };
       window.addEventListener('hashchange', onHash);
       onHash();
+
+      // Keyboard shortcuts
+      document.addEventListener('keydown', (e) => {
+        // Ignore when typing in an input/textarea/select
+        const tag = (e.target.tagName || '').toLowerCase();
+        const inField = tag === 'input' || tag === 'textarea' || tag === 'select' || e.target.isContentEditable;
+
+        if (e.key === 'Escape') {
+          // Close any open modal/panel
+          if (this.showNewMemoryModal)  { this.showNewMemoryModal = false; return; }
+          if (this.explainModal.show)   { this.closeExplainModal(); return; }
+          if (this.consolidateModal.show) { this.consolidateModal.show = false; return; }
+          if (this.decideModal.show)    { this.decideModal.show = false; return; }
+          if (this.selectedMemory)      { this.selectedMemory = null; return; }
+          if (this.confirmForgetId)     { this.confirmForgetId = null; return; }
+          if (this.showSignOutConfirm)  { this.showSignOutConfirm = false; return; }
+          if (this.vaultActionModal.show) { this.vaultActionModal.show = false; return; }
+          if (this.cloneModal.show)     { this.cloneModal.show = false; return; }
+          if (this.mergeModal.show)     { this.mergeModal.show = false; return; }
+          if (this.importModal.show)    { this.importModal.show = false; return; }
+          if (this.showShortcutsHelp)   { this.showShortcutsHelp = false; return; }
+        }
+
+        if (inField) return;
+
+        if (e.key === '/' && this.currentView === 'memories') {
+          e.preventDefault();
+          const input = document.getElementById('memory-search-input');
+          if (input) input.focus();
+        } else if (e.key === 'n' && this.currentView === 'memories') {
+          e.preventDefault();
+          this.showNewMemoryModal = true;
+        } else if (e.key === '?') {
+          e.preventDefault();
+          this.showShortcutsHelp = !this.showShortcutsHelp;
+        }
+      });
 
       // Fetch version from public health endpoint
       try {
@@ -271,6 +353,12 @@ document.addEventListener('alpine:init', () => {
     },
 
     _onViewEnter(view) {
+      // Stop observability polling when leaving the tab
+      if (this._obsInterval) {
+        clearInterval(this._obsInterval);
+        this._obsInterval = null;
+      }
+
       if (view === 'dashboard') {
         this.loadStats();
         // Chart init happens after DOM renders
@@ -278,8 +366,12 @@ document.addEventListener('alpine:init', () => {
       } else if (view === 'memories') {
         this.page = 0;
         this.loadMemories();
+        this.loadContradictions();
       } else if (view === 'session') {
         this.loadSession();
+      } else if (view === 'observability') {
+        this.loadObservability();
+        this._obsInterval = setInterval(() => this.loadObservability(), 5000);
       } else if (view === 'settings') {
         // Check current hash to determine which sub-tab to activate
         const hash = location.hash.replace(/^#\/?/, '');
@@ -558,15 +650,30 @@ document.addEventListener('alpine:init', () => {
       return n.toFixed(1) + ' ' + units[i];
     },
 
+    formatUptime(seconds) {
+      if (!seconds) return '0s';
+      const d = Math.floor(seconds / 86400);
+      const h = Math.floor((seconds % 86400) / 3600);
+      const m = Math.floor((seconds % 3600) / 60);
+      if (d > 0) return d + 'd ' + h + 'h';
+      if (h > 0) return h + 'h ' + m + 'm';
+      return m + 'm';
+    },
+
     // ── Memories ───────────────────────────────────────────────────────────
     async loadMemories() {
       this.memoriesLoading = true;
       try {
         const offset = this.page * 20;
-        const data = await this.apiCall(
-          '/api/engrams?vault=' + encodeURIComponent(this.vault) +
-          '&limit=20&offset=' + offset
-        );
+        let url = '/api/engrams?vault=' + encodeURIComponent(this.vault) +
+          '&limit=20&offset=' + offset;
+        const f = this.memoryFilters;
+        if (f.sort && f.sort !== 'created') url += '&sort=' + encodeURIComponent(f.sort);
+        if (f.tags && f.tags.trim()) url += '&tags=' + encodeURIComponent(f.tags.trim());
+        if (f.state && f.state.trim()) url += '&state=' + encodeURIComponent(f.state.trim());
+        if (f.minConf > 0) url += '&min_confidence=' + f.minConf;
+        if (f.maxConf > 0) url += '&max_confidence=' + f.maxConf;
+        const data = await this.apiCall(url);
         this.memories = data.engrams || [];
         this.totalMemories = data.total || 0;
       } catch (err) {
@@ -585,13 +692,17 @@ document.addEventListener('alpine:init', () => {
       this.memoriesLoading = true;
       try {
         // ActivateRequest uses context:[]string, max_results:int
-        const data = await this.apiCall('/api/activate', {
-          method: 'POST',
-          body: JSON.stringify({
+        const body = {
             context: [this.searchQuery.trim()],
             vault: this.vault,
             max_results: 20,
-          }),
+        };
+        if (this.searchMode && this.searchMode !== 'balanced') {
+            body.mode = this.searchMode;
+        }
+        const data = await this.apiCall('/api/activate', {
+          method: 'POST',
+          body: JSON.stringify(body),
         });
         // ActivateResponse has activations: [{id, concept, content, confidence, score}]
         const items = data.activations || data.results || [];
@@ -612,12 +723,36 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
+    async loadContradictions() {
+      try {
+        const data = await this.apiCall('/api/contradictions?vault=' + encodeURIComponent(this.vault));
+        this.contradictions = data.contradictions || [];
+        this.contradictionsLoaded = true;
+      } catch (_) {
+        this.contradictions = [];
+        this.contradictionsLoaded = true;
+      }
+    },
+
     openMemory(m) {
       this.selectedMemory = m;
       // Navigate to memories view if not there
       if (this.currentView !== 'memories') {
         this.currentView = 'memories';
       }
+    },
+
+    selectedMemoryIndex() {
+      if (!this.selectedMemory || !this.memories.length) return -1;
+      return this.memories.findIndex(m => m.id === this.selectedMemory.id);
+    },
+
+    navigateMemory(delta) {
+      const idx = this.selectedMemoryIndex();
+      if (idx === -1) return;
+      const next = idx + delta;
+      if (next < 0 || next >= this.memories.length) return;
+      this.selectedMemory = this.memories[next];
     },
 
     forgetMemory(id) {
@@ -661,6 +796,163 @@ document.addEventListener('alpine:init', () => {
         await this.loadMemories();
       } catch (err) {
         this.addNotification('error', 'Create failed: ' + err.message);
+      }
+    },
+
+    // ── Edit / Evolve ─────────────────────────────────────────────────────
+    startEditMemory() {
+      this.editingMemory = true;
+      this.editMemoryForm.content = this.selectedMemory ? this.selectedMemory.content : '';
+      this.editMemoryForm.reason = '';
+    },
+
+    cancelEditMemory() {
+      this.editingMemory = false;
+      this.editMemoryForm = { content: '', reason: '' };
+    },
+
+    async saveEditMemory() {
+      if (!this.selectedMemory) return;
+      if (!this.editMemoryForm.content.trim()) {
+        this.addNotification('error', 'Content cannot be empty');
+        return;
+      }
+      if (!this.editMemoryForm.reason.trim()) {
+        this.addNotification('error', 'Reason is required');
+        return;
+      }
+      this.editMemorySaving = true;
+      try {
+        const resp = await this.apiCall(
+          '/api/engrams/' + encodeURIComponent(this.selectedMemory.id) + '/evolve',
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              new_content: this.editMemoryForm.content,
+              reason: this.editMemoryForm.reason,
+            }),
+          }
+        );
+        this.selectedMemory = { ...this.selectedMemory, content: this.editMemoryForm.content };
+        this.editingMemory = false;
+        this.editMemoryForm = { content: '', reason: '' };
+        this.addNotification('success', 'Memory updated');
+        // Refresh the list so the new content shows there too
+        await this.loadMemories();
+      } catch (err) {
+        this.addNotification('error', 'Evolve failed: ' + err.message);
+      } finally {
+        this.editMemorySaving = false;
+      }
+    },
+
+    // ── Tag editing ────────────────────────────────────────────────────────
+    startEditTags() {
+      if (!this.selectedMemory) return;
+      this.editTagsValue = (this.selectedMemory.tags || []).join(', ');
+      this.editingTags = true;
+    },
+
+    cancelEditTags() {
+      this.editingTags = false;
+      this.editTagsValue = '';
+    },
+
+    async saveTags() {
+      if (!this.selectedMemory) return;
+      const tags = this.editTagsValue
+        .split(',')
+        .map(t => t.trim())
+        .filter(Boolean);
+      this.editTagsSaving = true;
+      try {
+        const resp = await this.apiCall(
+          '/api/engrams/' + encodeURIComponent(this.selectedMemory.id) + '/tags',
+          {
+            method: 'PUT',
+            body: JSON.stringify({ vault: this.vault, tags }),
+          }
+        );
+        this.selectedMemory = { ...this.selectedMemory, tags: resp.tags };
+        // Refresh list so tag chips update there too.
+        const idx = this.memories.findIndex(m => m.id === this.selectedMemory.id);
+        if (idx !== -1) {
+          this.memories[idx] = { ...this.memories[idx], tags: resp.tags };
+        }
+        this.editingTags = false;
+        this.editTagsValue = '';
+        this.addNotification('success', 'Tags updated');
+      } catch (err) {
+        this.addNotification('error', 'Tag update failed: ' + err.message);
+      } finally {
+        this.editTagsSaving = false;
+      }
+    },
+
+    // ── Link creation ──────────────────────────────────────────────────────
+    openLinkModal(sourceId) {
+      this.linkModal = { show: true, sourceId: sourceId, targetId: '', relType: 5, weight: 0.8 };
+    },
+
+    closeLinkModal() {
+      this.linkModal = { show: false, sourceId: '', targetId: '', relType: 5, weight: 0.8 };
+    },
+
+    async createLink() {
+      if (!this.linkModal.targetId.trim()) {
+        this.addNotification('error', 'Target ID is required');
+        return;
+      }
+      try {
+        await this.apiCall('/api/link', {
+          method: 'POST',
+          body: JSON.stringify({
+            source_id: this.linkModal.sourceId,
+            target_id: this.linkModal.targetId.trim(),
+            rel_type: parseInt(this.linkModal.relType, 10),
+            weight: parseFloat(this.linkModal.weight),
+            vault: this.vault,
+          }),
+        });
+        this.closeLinkModal();
+        this.addNotification('success', 'Association created');
+      } catch (err) {
+        this.addNotification('error', 'Link failed: ' + err.message);
+      }
+    },
+
+    // ── Create vault ───────────────────────────────────────────────────────
+    async createVault() {
+      const name = prompt('Enter new vault name (lowercase letters, digits, hyphens, underscores; 1-64 chars):');
+      if (!name) return;
+      const valid = /^[a-z0-9_-]{1,64}$/.test(name);
+      if (!valid) {
+        this.addNotification('error', 'Vault name must be 1-64 lowercase letters, digits, hyphens, or underscores');
+        return;
+      }
+      try {
+        // Register vault config entry (creates the vault record)
+        const r = await fetch('/api/admin/vaults/config', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name }),
+        });
+        if (!r.ok) {
+          const text = await r.text().catch(() => r.statusText);
+          throw new Error(r.status + ': ' + text);
+        }
+        // Hello handshake registers the vault name in the storage index
+        await fetch('/api/hello', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ version: '1', vault: name }),
+        }).catch(() => {});
+        this.vault = name;
+        localStorage.setItem('muninnVault', name);
+        await this.loadVaults();
+        this.addNotification('success', 'Vault  + name +  created');
+      } catch (err) {
+        this.addNotification('error', 'Create vault failed: ' + err.message);
       }
     },
 
@@ -790,6 +1082,33 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
+    // ── Backup ─────────────────────────────────────────────────────────────
+    async triggerBackup() {
+      this.backupLoading = true;
+      try {
+        const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        const outputDir = './backups/muninn-backup-' + ts;
+        const data = await this.apiCall('/api/admin/backup', {
+          method: 'POST',
+          body: JSON.stringify({ output_dir: outputDir }),
+        });
+        this.addNotification('success', 'Backup complete: ' + data.output_dir + ' (' + data.elapsed + ')');
+      } catch (err) {
+        this.addNotification('error', 'Backup failed: ' + err.message);
+      } finally {
+        this.backupLoading = false;
+      }
+    },
+
+    // ── Observability ─────────────────────────────────────────────────────
+    async loadObservability() {
+      try {
+        this.obs = await this.apiCall('/api/admin/observability');
+      } catch (e) {
+        console.error('Failed to load observability:', e);
+      }
+    },
+
     // ── Settings ───────────────────────────────────────────────────────────
     async loadEmbedStatus() {
       try {
@@ -898,6 +1217,7 @@ document.addEventListener('alpine:init', () => {
             this.plasticityForm.ftsWeight      = cfg.fts_weight      ?? null;
             this.plasticityForm.relevanceFloor     = cfg.relevance_floor     ?? null;
             this.plasticityForm.temporalHalflife = cfg.temporal_halflife ?? null;
+            this.plasticityForm.recallMode = cfg.recall_mode || data.resolved?.recall_mode || 'balanced';
         } catch (err) {
             console.error('loadPlasticity error:', err);
             this.plasticitySaveErr = 'Failed to load Plasticity settings';
@@ -1009,6 +1329,7 @@ document.addEventListener('alpine:init', () => {
         this.plasticitySaveErr = '';
         try {
             const payload = { version: 1, preset: this.plasticityForm.preset };
+            payload.recall_mode = this.plasticityForm.recallMode;
             if (this.plasticityForm.showAdvanced) {
                 if (this.plasticityForm.hopDepth       !== null) payload.hop_depth       = this.plasticityForm.hopDepth;
                 if (this.plasticityForm.semanticWeight !== null) payload.semantic_weight = this.plasticityForm.semanticWeight;
@@ -1042,6 +1363,21 @@ document.addEventListener('alpine:init', () => {
       } catch (_) {
         this.addNotification('error', 'Copy failed — select and copy manually');
       }
+    },
+
+    // ── API key expiry display ──────────────────────────────────────────────
+    formatKeyExpiry(expiresAt) {
+      if (!expiresAt) return 'Never';
+      const exp = new Date(expiresAt);
+      const now = new Date();
+      const diffMs = exp - now;
+      if (diffMs <= 0) return 'Expired';
+      const diffDays = Math.round(diffMs / 86400000);
+      if (diffDays === 0) return 'Today';
+      if (diffDays === 1) return 'Tomorrow';
+      if (diffDays < 30) return 'in ' + diffDays + ' days';
+      if (diffDays < 365) return 'in ' + Math.round(diffDays / 30) + ' months';
+      return exp.toLocaleDateString();
     },
 
     // ── Confidence helpers ─────────────────────────────────────────────────
@@ -1471,6 +1807,18 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
+    async reembedVault() {
+      if (!confirm(`Re-embed vault "${this.vault}"?\n\nThis clears all embeddings and lets the RetroactiveProcessor re-embed every engram with the current model.\n\nThe vault stays queryable during migration (with degraded recall).`)) return;
+      try {
+        const data = await this.apiCall('/api/admin/vaults/' + encodeURIComponent(this.vault) + '/reembed', { method: 'POST' });
+        this.addNotification('success', `Re-embed started (job ${data.job_id}). Monitor via Embed Status.`);
+        // Refresh embed status to show progress.
+        this.loadEmbedStatus();
+      } catch (e) {
+        this.addNotification('error', 'Re-embed failed: ' + (e?.message || 'unknown error'));
+      }
+    },
+
     // ── Vault actions ──────────────────────────────────────────────────────
     openVaultAction(action) {
       this.vaultActionModal = {
@@ -1515,6 +1863,37 @@ document.addEventListener('alpine:init', () => {
         }
       } catch (e) {
         this.addNotification('error', 'Network error');
+      }
+    },
+
+    // ── Rename ─────────────────────────────────────────────────────────────
+    openVaultRename() {
+      const newName = prompt('Enter new name for vault "' + this.vault + '":');
+      if (!newName || newName === this.vault) return;
+      this.renameVault(newName);
+    },
+
+    async renameVault(newName) {
+      try {
+        const r = await fetch(
+          '/api/admin/vaults/' + encodeURIComponent(this.vault) + '/rename',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ new_name: newName }),
+          }
+        );
+        if (!r.ok) {
+          const err = await r.json().catch(() => null);
+          const msg = err && err.error && err.error.message ? err.error.message : 'HTTP ' + r.status;
+          this.addNotification('error', 'Rename failed: ' + msg);
+          return;
+        }
+        this.vault = newName;
+        this.loadVaults();
+        this.addNotification('success', 'Vault renamed to "' + newName + '"');
+      } catch (e) {
+        this.addNotification('error', 'Rename failed: ' + e.message);
       }
     },
 
@@ -1614,6 +1993,108 @@ document.addEventListener('alpine:init', () => {
       this.activeJob = null;
     },
 
+    // ── Vault export ───────────────────────────────────────────────────────
+    async exportVault() {
+      this.vaultExporting = true;
+      try {
+        const res = await fetch('/api/admin/vaults/' + encodeURIComponent(this.vault) + '/export');
+        if (!res.ok) {
+          const text = await res.text().catch(() => res.statusText);
+          throw new Error(res.status + ': ' + text);
+        }
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = this.vault + '.muninn';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        this.addNotification('success', 'Vault exported: ' + this.vault + '.muninn');
+      } catch (e) {
+        this.addNotification('error', 'Export failed: ' + (e?.message || 'unknown error'));
+      } finally {
+        this.vaultExporting = false;
+      }
+    },
+
+    // ── Vault import ───────────────────────────────────────────────────────
+    openImportModal() {
+      this.importModal = { show: true, vaultName: '', file: null, resetMeta: false };
+    },
+
+    async startImport() {
+      if (!this.importModal.vaultName || !this.importModal.file) return;
+      const params = new URLSearchParams({
+        vault: this.importModal.vaultName,
+        reset_metadata: this.importModal.resetMeta ? 'true' : 'false',
+      });
+      try {
+        const res = await fetch('/api/admin/vaults/import?' + params.toString(), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body: this.importModal.file,
+        });
+        if (!res.ok) {
+          const text = await res.text().catch(() => res.statusText);
+          throw new Error(res.status + ': ' + text);
+        }
+        const data = await res.json();
+        const jobId = data.job_id;
+        this.startJobPolling(jobId, this.importModal.vaultName, () => {
+          this.loadVaults();
+          this.importModal.show = false;
+          this.addNotification('success', 'Vault imported successfully');
+        });
+      } catch (e) {
+        this.addNotification('error', 'Import failed: ' + (e?.message || 'unknown error'));
+      }
+    },
+
+    // ── FTS reindex ────────────────────────────────────────────────────────
+    async reindexFTS() {
+      if (!confirm('Reindex full-text search for vault "' + this.vault + '"?\n\nThis rebuilds the FTS index for all engrams. The vault stays queryable during reindex.')) return;
+      this.reindexing = true;
+      try {
+        const res = await fetch(
+          '/api/admin/vaults/' + encodeURIComponent(this.vault) + '/reindex-fts',
+          { method: 'POST' }
+        );
+        if (!res.ok) {
+          const text = await res.text().catch(() => res.statusText);
+          throw new Error(res.status + ': ' + text);
+        }
+        const data = await res.json();
+        this.addNotification('success', 'FTS reindex complete — ' + (data.engrams_reindexed || 0) + ' engrams reindexed');
+      } catch (e) {
+        this.addNotification('error', 'Reindex failed: ' + (e?.message || 'unknown error'));
+      } finally {
+        this.reindexing = false;
+      }
+    },
+
+    // ── Lifecycle state ────────────────────────────────────────────────────
+    async updateLifecycleState(id, state) {
+      try {
+        const res = await fetch('/api/engrams/' + encodeURIComponent(id) + '/state', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ vault: this.vault, state }),
+        });
+        if (!res.ok) {
+          const text = await res.text().catch(() => res.statusText);
+          throw new Error(res.status + ': ' + text);
+        }
+        if (this.selectedMemory && this.selectedMemory.id === id) {
+          this.selectedMemory = { ...this.selectedMemory, state };
+        }
+        this.addNotification('success', 'Lifecycle state updated to ' + state);
+      } catch (e) {
+        this.addNotification('error', 'State update failed: ' + (e?.message || 'unknown error'));
+      }
+    },
+
     async probeOllama() {
       if (this.pluginCfg.ollamaChecking) return;
       this.pluginCfg.ollamaChecking = true;
@@ -1644,6 +2125,119 @@ document.addEventListener('alpine:init', () => {
         this.pluginCfg.ollamaDetected = false;
       }
       this.pluginCfg.ollamaChecking = false;
+    },
+
+    // ── Explain Score ──────────────────────────────────────────────────────
+    async explainScore(engramId) {
+      if (!this.searchQuery.trim()) return;
+      this.explainModal = { show: true, data: null, loading: true };
+      try {
+        const data = await this.apiCall('/api/explain', {
+          method: 'POST',
+          body: JSON.stringify({
+            vault: this.vault,
+            engram_id: engramId,
+            query: [this.searchQuery.trim()],
+          }),
+        });
+        this.explainModal = { show: true, data, loading: false };
+      } catch (err) {
+        this.explainModal = { show: false, data: null, loading: false };
+        this.addNotification('error', 'Explain failed: ' + err.message);
+      }
+    },
+
+    closeExplainModal() {
+      this.explainModal = { show: false, data: null, loading: false };
+    },
+
+    // ── Multi-select / Consolidate ─────────────────────────────────────────
+    toggleMultiSelect() {
+      this.multiSelectMode = !this.multiSelectMode;
+      if (!this.multiSelectMode) {
+        this.selectedMemoryIds = [];
+      }
+    },
+
+    toggleMemorySelection(id) {
+      const idx = this.selectedMemoryIds.indexOf(id);
+      if (idx === -1) {
+        this.selectedMemoryIds.push(id);
+      } else {
+        this.selectedMemoryIds.splice(idx, 1);
+      }
+    },
+
+    openConsolidate() {
+      if (this.selectedMemoryIds.length < 2) {
+        this.addNotification('error', 'Select at least 2 memories to consolidate');
+        return;
+      }
+      // Pre-fill with combined content from selected memories
+      const selected = this.memories.filter(m => this.selectedMemoryIds.includes(m.id));
+      const combined = selected.map(m => (m.concept ? '[' + m.concept + ']\n' : '') + m.content).join('\n\n---\n\n');
+      this.consolidateModal = { show: true, mergedContent: combined };
+    },
+
+    async submitConsolidate() {
+      if (!this.consolidateModal.mergedContent.trim()) {
+        this.addNotification('error', 'Merged content cannot be empty');
+        return;
+      }
+      try {
+        const data = await this.apiCall('/api/consolidate', {
+          method: 'POST',
+          body: JSON.stringify({
+            vault: this.vault,
+            ids: this.selectedMemoryIds,
+            merged_content: this.consolidateModal.mergedContent.trim(),
+          }),
+        });
+        this.consolidateModal = { show: false, mergedContent: '' };
+        this.selectedMemoryIds = [];
+        this.multiSelectMode = false;
+        this.addNotification('success', 'Memories consolidated (new ID: ' + data.id.slice(0, 8) + '…)');
+        await this.loadMemories();
+      } catch (err) {
+        this.addNotification('error', 'Consolidate failed: ' + err.message);
+      }
+    },
+
+    // ── Decide ─────────────────────────────────────────────────────────────
+    openDecideModal() {
+      this.decideModal = { show: true, decision: '', rationale: '', alternatives: '', evidenceIds: '' };
+    },
+
+    async submitDecide() {
+      if (!this.decideModal.decision.trim()) {
+        this.addNotification('error', 'Decision text is required');
+        return;
+      }
+      const alternatives = this.decideModal.alternatives
+        .split('\n')
+        .map(s => s.trim())
+        .filter(Boolean);
+      const evidenceIds = this.decideModal.evidenceIds
+        .split('\n')
+        .map(s => s.trim())
+        .filter(Boolean);
+      try {
+        const data = await this.apiCall('/api/decide', {
+          method: 'POST',
+          body: JSON.stringify({
+            vault: this.vault,
+            decision: this.decideModal.decision.trim(),
+            rationale: this.decideModal.rationale.trim(),
+            alternatives,
+            evidence_ids: evidenceIds,
+          }),
+        });
+        this.decideModal = { show: false, decision: '', rationale: '', alternatives: '', evidenceIds: '' };
+        this.addNotification('success', 'Decision recorded (ID: ' + data.id.slice(0, 8) + '…)');
+        await this.loadMemories();
+      } catch (err) {
+        this.addNotification('error', 'Decide failed: ' + err.message);
+      }
     },
   }));
 });

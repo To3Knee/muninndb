@@ -2,6 +2,7 @@ package keys
 
 import (
 	"encoding/binary"
+	"fmt"
 	"math"
 
 	"github.com/dchest/siphash"
@@ -454,6 +455,29 @@ func WeightFromComplement(wc [4]byte) float32 {
 	c := binary.BigEndian.Uint32(wc[:])
 	w := uint32(math.MaxUint32) - c
 	return float32(w) / float32(math.MaxUint32)
+}
+
+// EmbedModelKey constructs the vault-level embed model marker key (0x1D prefix).
+// Key: 0x1D | wsPrefix(8) = 9 bytes
+// Value: UTF-8 model name string. Empty/missing = not tracked.
+func EmbedModelKey(ws [8]byte) []byte {
+	key := make([]byte, 1+8)
+	key[0] = 0x1D
+	copy(key[1:9], ws[:])
+	return key
+}
+
+// IncrementWSPrefix returns the next workspace prefix for use as an exclusive
+// upper bound in Pebble range operations.
+func IncrementWSPrefix(ws [8]byte) ([8]byte, error) {
+	result := ws
+	for i := 7; i >= 0; i-- {
+		result[i]++
+		if result[i] != 0 {
+			return result, nil
+		}
+	}
+	return [8]byte{}, fmt.Errorf("workspace prefix overflow")
 }
 
 // Hash computes a 32-bit FNV-1a hash for string tags/creators.

@@ -13,9 +13,11 @@ import (
 	"time"
 
 	"github.com/scrypster/muninndb/internal/cognitive"
+	"github.com/scrypster/muninndb/internal/engine"
 	"github.com/scrypster/muninndb/internal/engine/trigger"
 	"github.com/scrypster/muninndb/internal/engine/vaultjob"
 	"github.com/scrypster/muninndb/internal/logging"
+	"github.com/scrypster/muninndb/internal/plugin"
 	"github.com/scrypster/muninndb/internal/storage"
 	mbp "github.com/scrypster/muninndb/internal/transport/mbp"
 	"github.com/scrypster/muninndb/internal/transport/rest"
@@ -90,8 +92,11 @@ func (m *mockEngine) Unsubscribe(ctx context.Context, subID string) error {
 	return nil
 }
 
-func (m *mockEngine) ClearVault(ctx context.Context, vaultName string) error { return nil }
+func (m *mockEngine) ClearVault(ctx context.Context, vaultName string) error  { return nil }
 func (m *mockEngine) DeleteVault(ctx context.Context, vaultName string) error { return nil }
+func (m *mockEngine) RenameVault(ctx context.Context, oldName, newName string) error {
+	return nil
+}
 func (m *mockEngine) GetVaultJob(jobID string) (*vaultjob.Job, bool)          { return nil, false }
 func (m *mockEngine) StartClone(ctx context.Context, sourceVault, newName string) (*vaultjob.Job, error) {
 	return &vaultjob.Job{ID: "mock-clone-job", Operation: "clone", Source: sourceVault, Target: newName}, nil
@@ -135,6 +140,9 @@ func (m *mockEngine) Explain(ctx context.Context, vault string, req *rest.Explai
 func (m *mockEngine) UpdateState(ctx context.Context, vault, engramID, state, reason string) error {
 	return nil
 }
+func (m *mockEngine) UpdateTags(ctx context.Context, vault, engramID string, tags []string) error {
+	return nil
+}
 func (m *mockEngine) ListDeleted(ctx context.Context, vault string, limit int) (*rest.ListDeletedResponse, error) {
 	return &rest.ListDeletedResponse{}, nil
 }
@@ -148,6 +156,22 @@ func (m *mockEngine) GetGuide(ctx context.Context, vault string) (string, error)
 	return "", nil
 }
 
+func (m *mockEngine) StartReembedVault(ctx context.Context, vaultName, modelName string) (*vaultjob.Job, error) {
+	return &vaultjob.Job{ID: "mock-reembed-job", Operation: "reembed", Source: vaultName, Target: vaultName}, nil
+}
+
+func (m *mockEngine) CountEmbedded(ctx context.Context) int64 {
+	return 0
+}
+
+func (m *mockEngine) Observability(ctx context.Context, version string, uptimeSeconds int64) (*engine.ObservabilitySnapshot, error) {
+	return &engine.ObservabilitySnapshot{}, nil
+}
+
+func (m *mockEngine) GetProcessorStats() []plugin.RetroactiveStats {
+	return nil
+}
+
 func makeMockFS() fs.FS {
 	return fstest.MapFS{
 		"static/dist/app.css":   &fstest.MapFile{Data: []byte("/* css */")},
@@ -159,7 +183,7 @@ func makeMockFS() fs.FS {
 func TestNewServer(t *testing.T) {
 	webFS := makeMockFS()
 	eng := &mockEngine{}
-	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil))
+	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -171,7 +195,7 @@ func TestNewServer(t *testing.T) {
 func TestSPAHandler(t *testing.T) {
 	webFS := makeMockFS()
 	eng := &mockEngine{}
-	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil))
+	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -193,7 +217,7 @@ func TestSPAHandler(t *testing.T) {
 func TestStaticHandler(t *testing.T) {
 	webFS := makeMockFS()
 	eng := &mockEngine{}
-	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil))
+	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -211,7 +235,7 @@ func TestSPAHandlerNonRoot(t *testing.T) {
 	// All non-static paths should serve index.html (SPA catch-all)
 	webFS := makeMockFS()
 	eng := &mockEngine{}
-	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil))
+	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -235,7 +259,7 @@ func TestSSEResponseHeaders(t *testing.T) {
 	// Test SSE headers using a real httptest server (needs actual streaming)
 	webFS := makeMockFS()
 	eng := &mockEngine{}
-	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil))
+	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -276,7 +300,7 @@ func TestSSEResponseHeaders(t *testing.T) {
 func TestServerStartStop(t *testing.T) {
 	webFS := makeMockFS()
 	eng := &mockEngine{}
-	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil))
+	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -302,7 +326,7 @@ func TestSPAHandlerMissingIndex(t *testing.T) {
 		"templates/.keep":     &fstest.MapFile{Data: []byte("")},
 	}
 	eng := &mockEngine{}
-	srv, err := ui.NewServer(badFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil))
+	srv, err := ui.NewServer(badFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -333,7 +357,7 @@ func TestHandleLogs_ReturnsSnapshot(t *testing.T) {
 
 	webFS := makeMockFS()
 	eng := &mockEngine{}
-	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, rb)
+	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, rb, nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
