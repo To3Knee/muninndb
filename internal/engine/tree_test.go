@@ -47,7 +47,7 @@ func TestRememberAndRecallTree(t *testing.T) {
 		t.Fatalf("NodeMap: got %d entries, want 5", len(result.NodeMap))
 	}
 
-	tree, err := eng.RecallTree(ctx, vault, result.RootID, 10)
+	tree, err := eng.RecallTree(ctx, vault, result.RootID, 5, 0, true)
 	if err != nil {
 		t.Fatalf("RecallTree: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestRecallTree_LeafNode(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tree, err := eng.RecallTree(ctx, vault, result.RootID, 5)
+	tree, err := eng.RecallTree(ctx, vault, result.RootID, 5, 0, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,3 +100,87 @@ func TestRecallTree_LeafNode(t *testing.T) {
 		t.Errorf("expected no children, got %d", len(tree.Children))
 	}
 }
+
+func TestRecallTree_FilterCompleted(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+	vault := "filter-completed-tree"
+
+	// Create root with two children.
+	result, err := eng.RememberTree(ctx, &RememberTreeRequest{
+		Vault: vault,
+		Root: TreeNodeInput{
+			Concept: "Root",
+			Content: "Root node",
+			Type:    "goal",
+			Children: []TreeNodeInput{
+				{Concept: "Active Child", Content: "still active", Type: "task"},
+				{Concept: "Completed Child", Content: "already done", Type: "task"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("RememberTree: %v", err)
+	}
+
+	// Mark the second child as completed.
+	completedID, ok := result.NodeMap["Completed Child"]
+	if !ok {
+		t.Fatal("expected Completed Child in NodeMap")
+	}
+	if err := eng.UpdateLifecycleState(ctx, vault, completedID, "completed"); err != nil {
+		t.Fatalf("UpdateLifecycleState: %v", err)
+	}
+
+	// Recall without completed nodes.
+	tree, err := eng.RecallTree(ctx, vault, result.RootID, 5, 0, false)
+	if err != nil {
+		t.Fatalf("RecallTree: %v", err)
+	}
+
+	if len(tree.Children) != 1 {
+		t.Fatalf("expected 1 child after filtering completed, got %d", len(tree.Children))
+	}
+	if tree.Children[0].Concept != "Active Child" {
+		t.Errorf("expected Active Child, got %q", tree.Children[0].Concept)
+	}
+}
+
+func TestRecallTree_Limit(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+	vault := "limit-tree"
+
+	// Create a root with 3 children.
+	req := &RememberTreeRequest{
+		Vault: vault,
+		Root: TreeNodeInput{
+			Concept: "Root",
+			Content: "Root node",
+			Type:    "goal",
+			Children: []TreeNodeInput{
+				{Concept: "Child 1", Content: "first", Type: "task"},
+				{Concept: "Child 2", Content: "second", Type: "task"},
+				{Concept: "Child 3", Content: "third", Type: "task"},
+			},
+		},
+	}
+
+	result, err := eng.RememberTree(ctx, req)
+	if err != nil {
+		t.Fatalf("RememberTree: %v", err)
+	}
+
+	// Recall with limit=2.
+	tree, err := eng.RecallTree(ctx, vault, result.RootID, 5, 2, true)
+	if err != nil {
+		t.Fatalf("RecallTree: %v", err)
+	}
+
+	if len(tree.Children) != 2 {
+		t.Fatalf("expected 2 children with limit=2, got %d", len(tree.Children))
+	}
+}
+

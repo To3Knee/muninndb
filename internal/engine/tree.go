@@ -11,15 +11,12 @@ import (
 
 // TreeNode is a single node in a recalled memory tree.
 type TreeNode struct {
-	ID         string
-	Concept    string
-	Content    string
-	Summary    string
-	State      string
-	MemoryType string
-	Ordinal    int32
-	Confidence float32
-	Children   []*TreeNode
+	ID           string
+	Concept      string
+	State        string
+	Ordinal      int32
+	LastAccessed string
+	Children     []TreeNode
 }
 
 // TreeNodeInput is the input for a single node when building a tree.
@@ -131,7 +128,7 @@ func (e *Engine) writeTreeNode(
 
 // RecallTree reads the root engram then recursively reads children using
 // ListChildOrdinals (already sorted ascending by ordinal). Returns the full tree.
-func (e *Engine) RecallTree(ctx context.Context, vault, rootID string, maxDepth int) (*TreeNode, error) {
+func (e *Engine) RecallTree(ctx context.Context, vault, rootID string, maxDepth, limit int, includeCompleted bool) (*TreeNode, error) {
 	ws := e.store.ResolveVaultPrefix(vault)
 
 	id, err := storage.ParseULID(rootID)
@@ -139,7 +136,7 @@ func (e *Engine) RecallTree(ctx context.Context, vault, rootID string, maxDepth 
 		return nil, fmt.Errorf("parse root id: %w", err)
 	}
 
-	return e.recallTreeNode(ctx, ws, id, maxDepth, 0)
+	return e.recallTreeNode(ctx, ws, id, maxDepth, 0, limit, includeCompleted)
 }
 
 // recallTreeNode recursively reads a node and its children up to maxDepth.
@@ -148,6 +145,8 @@ func (e *Engine) recallTreeNode(
 	ws [8]byte,
 	id storage.ULID,
 	maxDepth, depth int,
+	limit int,
+	includeCompleted bool,
 ) (*TreeNode, error) {
 	eng, err := e.store.GetEngram(ctx, ws, id)
 	if err != nil {
@@ -157,14 +156,16 @@ func (e *Engine) recallTreeNode(
 		return nil, fmt.Errorf("engram %s not found", id.String())
 	}
 
+	var lastAccessed string
+	if !eng.LastAccess.IsZero() {
+		lastAccessed = eng.LastAccess.Format(time.RFC3339)
+	}
+
 	node := &TreeNode{
-		ID:         eng.ID.String(),
-		Concept:    eng.Concept,
-		Content:    eng.Content,
-		Summary:    eng.Summary,
-		State:      fmt.Sprintf("%d", eng.State),
-		MemoryType: eng.MemoryType.String(),
-		Confidence: eng.Confidence,
+		ID:           eng.ID.String(),
+		Concept:      eng.Concept,
+		State:        fmt.Sprintf("%d", eng.State),
+		LastAccessed: lastAccessed,
 	}
 
 	if depth >= maxDepth {
@@ -176,13 +177,20 @@ func (e *Engine) recallTreeNode(
 		return nil, fmt.Errorf("list child ordinals for %s: %w", id.String(), err)
 	}
 
+	if limit > 0 && len(ordinals) > limit {
+		ordinals = ordinals[:limit]
+	}
+
 	for _, entry := range ordinals {
-		child, err := e.recallTreeNode(ctx, ws, entry.ChildID, maxDepth, depth+1)
+		child, err := e.recallTreeNode(ctx, ws, entry.ChildID, maxDepth, depth+1, limit, includeCompleted)
 		if err != nil {
 			return nil, err
 		}
+		if !includeCompleted && child.State == fmt.Sprintf("%d", storage.StateCompleted) {
+			continue
+		}
 		child.Ordinal = entry.Ordinal
-		node.Children = append(node.Children, child)
+		node.Children = append(node.Children, *child)
 	}
 
 	return node, nil
