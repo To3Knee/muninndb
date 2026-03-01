@@ -42,6 +42,7 @@ func TestKeyPrefixesAreUnique(t *testing.T) {
 		{"BucketMigrationKey", BucketMigrationKey(ws)},
 		{"EmbeddingKey", EmbeddingKey(ws, id)},
 		{"TransitionKey", TransitionKey(ws, id, id)},
+		{"OrdinalKey", OrdinalKey(ws, id, id)},
 	}
 
 	seen := make(map[byte]string)
@@ -141,6 +142,15 @@ func TestOrdinalPrefixForParent(t *testing.T) {
 	for i, b := range parent {
 		if prefix[9+i] != b {
 			t.Fatalf("parentID byte %d: got 0x%02X, want 0x%02X", i, prefix[9+i], b)
+		}
+	}
+
+	// OrdinalPrefixForParent must be a byte-for-byte prefix of OrdinalKey with same inputs.
+	child := [16]byte{0x20}
+	full := OrdinalKey(ws, parent, child)
+	for i := 0; i < len(prefix); i++ {
+		if prefix[i] != full[i] {
+			t.Errorf("OrdinalPrefixForParent[%d] = 0x%02X, want 0x%02X (from OrdinalKey)", i, prefix[i], full[i])
 		}
 	}
 }
