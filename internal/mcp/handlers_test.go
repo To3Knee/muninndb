@@ -974,3 +974,18 @@ func TestHandleStatus_HappyPath(t *testing.T) {
 		t.Error("response missing field: \"total_memories\"")
 	}
 }
+
+func TestHandleStatus_IncludesEnrichmentMode(t *testing.T) {
+	srv := newTestServer()
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_status","arguments":{"vault":"default"}}}`
+	w := postRPC(t, srv, body)
+	content := extractInnerJSON(t, decodeResp(t, w.Body.String()))
+
+	mode, ok := content["enrichment_mode"].(string)
+	if !ok {
+		t.Fatal("response missing or wrong type for field: \"enrichment_mode\"")
+	}
+	if mode == "" {
+		t.Error("enrichment_mode should be a non-empty string; expected \"none\", \"inline\", or \"plugin:<name>\"")
+	}
+}

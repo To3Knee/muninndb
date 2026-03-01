@@ -95,6 +95,9 @@ func (f *fakeEngine) AddChild(_ context.Context, vault, parentID string, child *
 func (f *fakeEngine) CountChildren(_ context.Context, vault, engramID string) (int, error) {
 	return 0, nil
 }
+func (f *fakeEngine) GetEnrichmentMode(_ context.Context) string {
+	return "none"
+}
 
 func newTestServer() *MCPServer {
 	return New(":0", &fakeEngine{}, "", nil)

@@ -142,6 +142,25 @@ func (e *Engine) GetProcessorStats() []plugin.RetroactiveStats {
 	return stats
 }
 
+// GetEnrichmentMode returns a human-readable string describing the active enrichment setup.
+// Returns "none" when no processors are configured, "plugin:<name>" when an enrich plugin
+// is active, or "inline" when only embed processors are registered.
+func (e *Engine) GetEnrichmentMode() string {
+	if len(e.retroProcessors) == 0 {
+		return "none"
+	}
+	for _, p := range e.retroProcessors {
+		if p == nil {
+			continue
+		}
+		stats := p.Stats()
+		if p.Mode() == "enrich" && stats.PluginName != "" && stats.Status != "stopped" {
+			return "plugin:" + stats.PluginName
+		}
+	}
+	return "inline"
+}
+
 // LatencyTracker returns the latency tracker (may be nil).
 func (e *Engine) LatencyTracker() *latency.Tracker {
 	return e.latencyTracker

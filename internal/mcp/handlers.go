@@ -350,10 +350,12 @@ func (s *MCPServer) handleStatus(ctx context.Context, w http.ResponseWriter, id 
 		sendError(w, id, -32000, "tool error: "+err.Error())
 		return
 	}
+	enrichMode := s.engine.GetEnrichmentMode(ctx)
 	status := VaultStatus{
-		Vault:         vault,
-		TotalMemories: resp.EngramCount,
-		Health:        "good",
+		Vault:          vault,
+		TotalMemories:  resp.EngramCount,
+		Health:         "good",
+		EnrichmentMode: enrichMode,
 	}
 	sendResult(w, id, textContent(mustJSON(status)))
 }

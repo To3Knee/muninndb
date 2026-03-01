@@ -84,6 +84,15 @@ func (rp *RetroactiveProcessor) Stats() RetroactiveStats {
 	return rp.stats
 }
 
+// Mode returns "embed" when this processor handles embedding (DigestEmbed flag)
+// or "enrich" when it handles enrichment (DigestEnrich flag).
+func (rp *RetroactiveProcessor) Mode() string {
+	if rp.flagBit == DigestEmbed {
+		return "embed"
+	}
+	return "enrich"
+}
+
 func (rp *RetroactiveProcessor) run(ctx context.Context) {
 	defer rp.wg.Done()
 

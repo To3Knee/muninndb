@@ -75,10 +75,22 @@ type ContradictionPair struct {
 	DetectedAt time.Time `json:"detected_at"`
 }
 
+// VaultStatus is returned by muninn_status.
 type VaultStatus struct {
 	Vault         string `json:"vault"`
 	TotalMemories int64  `json:"total_memories"`
 	Health        string `json:"health"`
+
+	// Enrichment capability
+	EnrichmentMode string                `json:"enrichment_mode"` // "none", "inline", "plugin:<name>"
+	Plugins        []PluginStatusSummary `json:"plugins,omitempty"`
+}
+
+// PluginStatusSummary is a brief health summary for one plugin.
+type PluginStatusSummary struct {
+	Name    string `json:"name"`
+	Healthy bool   `json:"healthy"`
+	Mode    string `json:"mode"` // "embed" or "enrich"
 }
 
 type SessionEntry struct {

@@ -75,4 +75,9 @@ type EngineInterface interface {
 	// via the ordinal index. Returns 0 if the engram has no children or if the
 	// engramID is invalid.
 	CountChildren(ctx context.Context, vault, engramID string) (int, error)
+
+	// GetEnrichmentMode returns a string describing the active enrichment configuration.
+	// Returns "none" when no enrich plugin is configured, "plugin:<name>" when a plugin
+	// is active, or "inline" when only inline enrichment is available.
+	GetEnrichmentMode(ctx context.Context) string
 }

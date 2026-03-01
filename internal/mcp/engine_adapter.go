@@ -258,6 +258,10 @@ func (a *mcpEngineAdapter) CountChildren(ctx context.Context, vault, engramID st
 	return a.eng.CountChildren(ctx, vault, engramID)
 }
 
+func (a *mcpEngineAdapter) GetEnrichmentMode(ctx context.Context) string {
+	return a.eng.GetEnrichmentMode()
+}
+
 func (a *mcpEngineAdapter) AddChild(ctx context.Context, vault, parentID string, child *AddChildRequest) (*AddChildResult, error) {
 	input := &engine.AddChildInput{
 		Concept: child.Concept,
