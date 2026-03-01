@@ -696,7 +696,11 @@ func (s *MCPServer) handleAddChild(ctx context.Context, w http.ResponseWriter, i
 		sendError(w, id, -32602, "invalid params: 'concept' is required")
 		return
 	}
-	content, _ := args["content"].(string)
+	content, ok := args["content"].(string)
+	if !ok || content == "" {
+		sendError(w, id, -32602, "invalid params: 'content' is required")
+		return
+	}
 	child := &AddChildRequest{Concept: concept, Content: content}
 	if t, ok := args["type"].(string); ok {
 		child.Type = t
