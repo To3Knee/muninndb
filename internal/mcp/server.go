@@ -195,6 +195,8 @@ func (s *MCPServer) dispatchToolCall(ctx context.Context, w http.ResponseWriter,
 		"muninn_retry_enrich": s.handleRetryEnrich,
 		"muninn_guide":        s.handleGuide,
 		// Hierarchical memory tools
+		"muninn_where_left_off": s.handleWhereLeftOff,
+
 		"muninn_remember_tree": s.handleRememberTree,
 		"muninn_recall_tree":   s.handleRecallTree,
 		"muninn_add_child":     s.handleAddChild,

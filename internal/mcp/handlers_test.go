@@ -989,3 +989,144 @@ func TestHandleStatus_IncludesEnrichmentMode(t *testing.T) {
 		t.Error("enrichment_mode should be a non-empty string; expected \"none\", \"inline\", or \"plugin:<name>\"")
 	}
 }
+
+// ── muninn_where_left_off ────────────────────────────────────────────────────
+
+// whereLeftOffEngine returns a populated WhereLeftOff result for shape tests.
+type whereLeftOffEngine struct{ fakeEngine }
+
+func (e *whereLeftOffEngine) WhereLeftOff(_ context.Context, _ string, _ int) ([]WhereLeftOffEntry, error) {
+	return []WhereLeftOffEntry{
+		{
+			ID:         "entry-1",
+			Concept:    "recent work",
+			Summary:    "working on feature X",
+			LastAccess: time.Now().Add(-5 * time.Minute),
+			State:      "active",
+		},
+		{
+			ID:         "entry-2",
+			Concept:    "older work",
+			LastAccess: time.Now().Add(-30 * time.Minute),
+			State:      "paused",
+		},
+	}, nil
+}
+
+type whereLeftOffErrEngine struct{ fakeEngine }
+
+func (e *whereLeftOffErrEngine) WhereLeftOff(_ context.Context, _ string, _ int) ([]WhereLeftOffEntry, error) {
+	return nil, fmt.Errorf("storage unavailable")
+}
+
+type whereLeftOffLimitEngine struct {
+	fakeEngine
+	lastLimit int
+}
+
+func (e *whereLeftOffLimitEngine) WhereLeftOff(_ context.Context, _ string, limit int) ([]WhereLeftOffEntry, error) {
+	e.lastLimit = limit
+	return []WhereLeftOffEntry{}, nil
+}
+
+func TestHandleWhereLeftOff_HappyPath(t *testing.T) {
+	srv := newTestServer()
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_where_left_off","arguments":{"vault":"default"}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	if resp.Result == nil {
+		t.Fatal("expected non-nil result")
+	}
+}
+
+func TestHandleWhereLeftOff_ResponseShape(t *testing.T) {
+	srv := newTestServerWith(&whereLeftOffEngine{})
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_where_left_off","arguments":{"vault":"default"}}}`
+	w := postRPC(t, srv, body)
+	content := extractInnerJSON(t, decodeResp(t, w.Body.String()))
+
+	for _, field := range []string{"memories", "count", "hint"} {
+		if _, ok := content[field]; !ok {
+			t.Errorf("response missing field: %q", field)
+		}
+	}
+
+	memories, ok := content["memories"].([]any)
+	if !ok {
+		t.Fatal("expected memories to be an array")
+	}
+	if len(memories) != 2 {
+		t.Fatalf("expected 2 memories, got %d", len(memories))
+	}
+
+	entry, ok := memories[0].(map[string]any)
+	if !ok {
+		t.Fatal("memories[0] is not an object")
+	}
+	for _, field := range []string{"id", "concept", "last_access", "state"} {
+		if _, ok := entry[field]; !ok {
+			t.Errorf("memory entry missing field: %q", field)
+		}
+	}
+
+	count, ok := content["count"].(float64)
+	if !ok || int(count) != 2 {
+		t.Errorf("expected count=2, got %v", content["count"])
+	}
+}
+
+func TestHandleWhereLeftOff_EmptyVault(t *testing.T) {
+	srv := newTestServer()
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_where_left_off","arguments":{"vault":"default"}}}`
+	w := postRPC(t, srv, body)
+	content := extractInnerJSON(t, decodeResp(t, w.Body.String()))
+
+	memories, ok := content["memories"].([]any)
+	if !ok {
+		t.Fatal("expected memories to be an array")
+	}
+	if len(memories) != 0 {
+		t.Errorf("expected empty memories, got %d", len(memories))
+	}
+
+	count, ok := content["count"].(float64)
+	if !ok || int(count) != 0 {
+		t.Errorf("expected count=0, got %v", content["count"])
+	}
+}
+
+func TestHandleWhereLeftOff_EngineError(t *testing.T) {
+	srv := newTestServerWith(&whereLeftOffErrEngine{})
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_where_left_off","arguments":{"vault":"default"}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error == nil || resp.Error.Code != -32000 {
+		t.Errorf("expected -32000 for engine error, got %v", resp.Error)
+	}
+	if !strings.Contains(resp.Error.Message, "storage unavailable") {
+		t.Errorf("error message should mention storage error, got: %s", resp.Error.Message)
+	}
+}
+
+func TestHandleWhereLeftOff_LimitDefault(t *testing.T) {
+	eng := &whereLeftOffLimitEngine{}
+	srv := newTestServerWith(eng)
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_where_left_off","arguments":{"vault":"default"}}}`
+	postRPC(t, srv, body)
+	if eng.lastLimit != 10 {
+		t.Errorf("expected default limit=10, got %d", eng.lastLimit)
+	}
+}
+
+func TestHandleWhereLeftOff_LimitCapped(t *testing.T) {
+	eng := &whereLeftOffLimitEngine{}
+	srv := newTestServerWith(eng)
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_where_left_off","arguments":{"vault":"default","limit":999}}}`
+	postRPC(t, srv, body)
+	if eng.lastLimit != 50 {
+		t.Errorf("expected limit capped to 50, got %d", eng.lastLimit)
+	}
+}

@@ -250,6 +250,15 @@ type AddChildResult struct {
 	Ordinal int32  `json:"ordinal"`
 }
 
+// WhereLeftOffEntry is one result from muninn_where_left_off.
+type WhereLeftOffEntry struct {
+	ID         string    `json:"id"`
+	Concept    string    `json:"concept"`
+	Summary    string    `json:"summary,omitempty"`
+	LastAccess time.Time `json:"last_access"`
+	State      string    `json:"state"`
+}
+
 // --- Cognitive push notification param types ---
 // These are pre-serialized to json.RawMessage at emission sites.
 

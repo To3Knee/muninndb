@@ -98,6 +98,9 @@ func (f *fakeEngine) CountChildren(_ context.Context, vault, engramID string) (i
 func (f *fakeEngine) GetEnrichmentMode(_ context.Context) string {
 	return "none"
 }
+func (f *fakeEngine) WhereLeftOff(_ context.Context, _ string, _ int) ([]WhereLeftOffEntry, error) {
+	return []WhereLeftOffEntry{}, nil
+}
 
 func newTestServer() *MCPServer {
 	return New(":0", &fakeEngine{}, "", nil)
@@ -196,8 +199,8 @@ func TestListTools(t *testing.T) {
 	var result map[string]any
 	json.NewDecoder(w.Body).Decode(&result)
 	tools, _ := result["tools"].([]any)
-	if len(tools) != 22 {
-		t.Errorf("expected 22 tools, got %d", len(tools))
+	if len(tools) != 23 {
+		t.Errorf("expected 23 tools, got %d", len(tools))
 	}
 }
 

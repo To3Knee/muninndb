@@ -343,6 +343,21 @@ func allToolDefinitions() []ToolDefinition {
 				"required": []string{},
 			},
 		},
+		{
+			Name:        "muninn_where_left_off",
+			Description: "Surface what was being worked on at the end of the last session. Returns the most recently accessed active memories, sorted by recency. Call this at session start to orient yourself before any user queries.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"vault": vaultProp,
+					"limit": map[string]any{
+						"type":        "integer",
+						"description": "Max memories to return (default 10, max 50).",
+					},
+				},
+				"required": []string{},
+			},
+		},
 		// Hierarchical memory tools
 		{
 			Name:        "muninn_remember_tree",

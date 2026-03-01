@@ -277,6 +277,49 @@ func (a *mcpEngineAdapter) AddChild(ctx context.Context, vault, parentID string,
 	return &AddChildResult{ChildID: r.ChildID, Ordinal: r.Ordinal}, nil
 }
 
+func (a *mcpEngineAdapter) WhereLeftOff(ctx context.Context, vault string, limit int) ([]WhereLeftOffEntry, error) {
+	engrams, err := a.eng.WhereLeftOff(ctx, vault, limit)
+	if err != nil {
+		return nil, err
+	}
+	entries := make([]WhereLeftOffEntry, 0, len(engrams))
+	for _, eng := range engrams {
+		if eng == nil {
+			continue
+		}
+		entries = append(entries, WhereLeftOffEntry{
+			ID:         eng.ID.String(),
+			Concept:    eng.Concept,
+			Summary:    eng.Summary,
+			LastAccess: eng.LastAccess,
+			State:      lifecycleStateLabel(eng.State),
+		})
+	}
+	return entries, nil
+}
+
+// lifecycleStateLabel converts a storage.LifecycleState to a display string.
+func lifecycleStateLabel(s storage.LifecycleState) string {
+	switch s {
+	case storage.StateActive:
+		return "active"
+	case storage.StatePaused:
+		return "paused"
+	case storage.StateArchived:
+		return "archived"
+	case storage.StateBlocked:
+		return "blocked"
+	case storage.StatePlanning:
+		return "planning"
+	case storage.StateCompleted:
+		return "completed"
+	case storage.StateCancelled:
+		return "cancelled"
+	default:
+		return "unknown"
+	}
+}
+
 // convertTreeNodeInput converts MCP → engine input types.
 func convertTreeNodeInput(n TreeNodeInput) engine.TreeNodeInput {
 	out := engine.TreeNodeInput{

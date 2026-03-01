@@ -80,4 +80,8 @@ type EngineInterface interface {
 	// Returns "none" when no enrich plugin is configured, "plugin:<name>" when a plugin
 	// is active, or "inline" when only inline enrichment is available.
 	GetEnrichmentMode(ctx context.Context) string
+
+	// WhereLeftOff returns the most recently accessed active engrams, sorted by
+	// LastAccess descending. limit caps results (default 10, max 50).
+	WhereLeftOff(ctx context.Context, vault string, limit int) ([]WhereLeftOffEntry, error)
 }

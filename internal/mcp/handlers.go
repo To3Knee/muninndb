@@ -610,6 +610,33 @@ func (s *MCPServer) handleListDeleted(ctx context.Context, w http.ResponseWriter
 	})))
 }
 
+func (s *MCPServer) handleWhereLeftOff(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
+	limit := 10
+	if v, ok := args["limit"].(float64); ok {
+		limit = int(v)
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 50 {
+		limit = 50
+	}
+
+	entries, err := s.engine.WhereLeftOff(ctx, vault, limit)
+	if err != nil {
+		sendError(w, id, -32000, "tool error: "+err.Error())
+		return
+	}
+	if entries == nil {
+		entries = []WhereLeftOffEntry{}
+	}
+	sendResult(w, id, textContent(mustJSON(map[string]any{
+		"memories": entries,
+		"count":    len(entries),
+		"hint":     "These are your most recently accessed memories. Use them to orient yourself for this session.",
+	})))
+}
+
 func (s *MCPServer) handleRetryEnrich(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
 	engramID, ok := args["id"].(string)
 	if !ok || engramID == "" {
