@@ -88,6 +88,10 @@ type Engine struct {
 	// so Observability() can report their stats. Set via SetRetroactiveProcessors.
 	retroProcessors []*plugin.RetroactiveProcessor
 
+	// enrichPlugin is the optional EnrichPlugin used by ReplayEnrichment.
+	// Set via SetEnrichPlugin after construction.
+	enrichPlugin plugin.EnrichPlugin
+
 	// noveltyJobsDropped counts novelty jobs silently dropped because the channel was full.
 	noveltyJobsDropped atomic.Int64
 

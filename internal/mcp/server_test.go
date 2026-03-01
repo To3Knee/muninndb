@@ -130,6 +130,14 @@ func (f *fakeEngine) FindSimilarEntities(_ context.Context, _ string, _ float64,
 func (f *fakeEngine) MergeEntity(_ context.Context, _, _, _ string, _ bool) (*engine.MergeEntityResult, error) {
 	return &engine.MergeEntityResult{}, nil
 }
+func (f *fakeEngine) ReplayEnrichment(_ context.Context, _ string, _ []string, _ int, dryRun bool) (*engine.ReplayEnrichmentResult, error) {
+	return &engine.ReplayEnrichmentResult{
+		Processed: 3,
+		Skipped:   1,
+		StagesRun: []string{"entities", "relationships", "classification", "summary"},
+		DryRun:    dryRun,
+	}, nil
+}
 
 func newTestServer() *MCPServer {
 	return New(":0", &fakeEngine{}, "", nil)
@@ -228,8 +236,8 @@ func TestListTools(t *testing.T) {
 	var result map[string]any
 	json.NewDecoder(w.Body).Decode(&result)
 	tools, _ := result["tools"].([]any)
-	if len(tools) != 30 {
-		t.Errorf("expected 30 tools, got %d", len(tools))
+	if len(tools) != 31 {
+		t.Errorf("expected 31 tools, got %d", len(tools))
 	}
 }
 

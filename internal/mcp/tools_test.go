@@ -7,8 +7,8 @@ import (
 
 func TestAllToolDefinitionsCount(t *testing.T) {
 	tools := allToolDefinitions()
-	if len(tools) != 30 {
-		t.Errorf("expected 30 tools, got %d", len(tools))
+	if len(tools) != 31 {
+		t.Errorf("expected 31 tools, got %d", len(tools))
 	}
 }
 
@@ -91,6 +91,8 @@ func TestExpectedToolNames(t *testing.T) {
 		"muninn_merge_entity",
 		// Entity timeline
 		"muninn_entity_timeline",
+		// Enrichment replay
+		"muninn_replay_enrichment",
 	}
 	for _, name := range expected {
 		if !names[name] {

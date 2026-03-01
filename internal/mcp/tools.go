@@ -504,6 +504,31 @@ func allToolDefinitions() []ToolDefinition {
 				"required": []string{"entity_a", "entity_b"},
 			},
 		},
+		// Enrichment replay
+		{
+			Name:        "muninn_replay_enrichment",
+			Description: "Re-run the enrichment pipeline for memories in a vault that are missing specific digest stages (entities, relationships, classification, summary). Use this to retroactively enrich memories that were stored before an LLM provider was configured, or to fill in specific pipeline stages that were skipped. Supports dry_run=true to preview what would be processed without writing.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"vault": vaultProp,
+					"stages": map[string]any{
+						"type":        "array",
+						"items":       map[string]any{"type": "string", "enum": []string{"entities", "relationships", "classification", "summary"}},
+						"description": "Which enrichment stages to re-run. Defaults to all four: entities, relationships, classification, summary. Only memories missing these stages will be processed.",
+					},
+					"limit": map[string]any{
+						"type":        "integer",
+						"description": "Maximum number of memories to process in this call (default 50, max 200). Use multiple calls to process larger vaults incrementally.",
+					},
+					"dry_run": map[string]any{
+						"type":        "boolean",
+						"description": "When true, scan and count how many memories would be enriched without actually running enrichment. Use to gauge scope before committing (default false).",
+					},
+				},
+				"required": []string{},
+			},
+		},
 		// Entity timeline
 		{
 			Name:        "muninn_entity_timeline",

@@ -368,6 +368,10 @@ func (a *mcpEngineAdapter) MergeEntity(ctx context.Context, vault, entityA, enti
 	return a.eng.MergeEntity(ctx, vault, entityA, entityB, dryRun)
 }
 
+func (a *mcpEngineAdapter) ReplayEnrichment(ctx context.Context, vault string, stages []string, limit int, dryRun bool) (*engine.ReplayEnrichmentResult, error) {
+	return a.eng.ReplayEnrichment(ctx, vault, stages, limit, dryRun)
+}
+
 // convertTreeNodeInput converts MCP → engine input types.
 func convertTreeNodeInput(n TreeNodeInput) engine.TreeNodeInput {
 	out := engine.TreeNodeInput{

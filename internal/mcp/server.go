@@ -229,6 +229,9 @@ func (s *MCPServer) dispatchToolCall(ctx context.Context, w http.ResponseWriter,
 
 		// Entity timeline
 		"muninn_entity_timeline": s.handleEntityTimeline,
+
+		// Enrichment replay
+		"muninn_replay_enrichment": s.handleReplayEnrichment,
 	}
 
 	handler, found := handlers[req.Params.Name]

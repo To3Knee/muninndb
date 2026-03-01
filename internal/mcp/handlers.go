@@ -1161,6 +1161,51 @@ func (s *MCPServer) handleMergeEntity(ctx context.Context, w http.ResponseWriter
 	})))
 }
 
+func (s *MCPServer) handleReplayEnrichment(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
+	if vault == "" {
+		sendError(w, id, -32602, "invalid params: 'vault' is required")
+		return
+	}
+
+	// Parse stages (optional array of strings).
+	var stages []string
+	if stagesAny, ok := args["stages"].([]any); ok {
+		for _, v := range stagesAny {
+			if s, ok := v.(string); ok && s != "" {
+				stages = append(stages, s)
+			}
+		}
+	}
+
+	// Parse limit (optional, default 50, max 200).
+	limit := 50
+	if v, ok := args["limit"].(float64); ok {
+		limit = int(v)
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	// Parse dry_run (optional, default false).
+	dryRun, _ := args["dry_run"].(bool)
+
+	result, err := s.engine.ReplayEnrichment(ctx, vault, stages, limit, dryRun)
+	if err != nil {
+		sendError(w, id, -32000, "tool error: "+err.Error())
+		return
+	}
+
+	sendResult(w, id, textContent(mustJSON(map[string]any{
+		"processed":  result.Processed,
+		"skipped":    result.Skipped,
+		"stages_run": result.StagesRun,
+		"dry_run":    result.DryRun,
+	})))
+}
+
 func (s *MCPServer) handleEntityTimeline(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
 	entityName, ok := args["entity_name"].(string)
 	if !ok || entityName == "" {

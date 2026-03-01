@@ -122,4 +122,11 @@ type EngineInterface interface {
 	// MergeEntity merges entityA into entityB (canonical). When dryRun=true it
 	// reports what would happen without writing any data.
 	MergeEntity(ctx context.Context, vault, entityA, entityB string, dryRun bool) (*engine.MergeEntityResult, error)
+
+	// ReplayEnrichment re-runs the enrichment pipeline for active engrams in a vault
+	// that are missing specific digest stage flags.
+	// stages is a subset of ["entities","relationships","classification","summary"].
+	// limit caps how many engrams are processed in this call (1-200, default 50).
+	// When dryRun=true, only counts engrams needing enrichment without writing.
+	ReplayEnrichment(ctx context.Context, vault string, stages []string, limit int, dryRun bool) (*engine.ReplayEnrichmentResult, error)
 }

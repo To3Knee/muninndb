@@ -1503,6 +1503,9 @@ func (e *slowIdempotentEngine) FindSimilarEntities(ctx context.Context, vault st
 func (e *slowIdempotentEngine) MergeEntity(ctx context.Context, vault string, entityA string, entityB string, dryRun bool) (*engine.MergeEntityResult, error) {
 	return (&fakeEngine{}).MergeEntity(ctx, vault, entityA, entityB, dryRun)
 }
+func (e *slowIdempotentEngine) ReplayEnrichment(ctx context.Context, vault string, stages []string, limit int, dryRun bool) (*engine.ReplayEnrichmentResult, error) {
+	return (&fakeEngine{}).ReplayEnrichment(ctx, vault, stages, limit, dryRun)
+}
 
 // TestHandleRemember_ConcurrentSameOpID verifies that two concurrent
 // muninn_remember calls carrying the same op_id do not produce duplicate
@@ -2104,5 +2107,104 @@ func TestHandleMergeEntity_EngineError(t *testing.T) {
 	resp := decodeResp(t, w.Body.String())
 	if resp.Error == nil || resp.Error.Code != -32000 {
 		t.Errorf("expected -32000 for engine error, got %v", resp.Error)
+	}
+}
+
+// ── muninn_replay_enrichment ────────────────────────────────────────────────
+
+type replayEnrichEngine struct {
+	fakeEngine
+	result *engine.ReplayEnrichmentResult
+	err    error
+}
+
+func (e *replayEnrichEngine) ReplayEnrichment(_ context.Context, _ string, _ []string, _ int, dryRun bool) (*engine.ReplayEnrichmentResult, error) {
+	if e.err != nil {
+		return nil, e.err
+	}
+	if e.result != nil {
+		r := *e.result
+		r.DryRun = dryRun
+		return &r, nil
+	}
+	return &engine.ReplayEnrichmentResult{Processed: 5, Skipped: 2, StagesRun: []string{"entities", "relationships", "classification", "summary"}, DryRun: dryRun}, nil
+}
+
+func TestHandleReplayEnrichment_HappyPath(t *testing.T) {
+	srv := newTestServerWith(&replayEnrichEngine{})
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_replay_enrichment","arguments":{"vault":"default"}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	inner := extractInnerJSON(t, resp)
+
+	if _, ok := inner["processed"]; !ok {
+		t.Error("response missing 'processed' field")
+	}
+	if _, ok := inner["skipped"]; !ok {
+		t.Error("response missing 'skipped' field")
+	}
+	if _, ok := inner["stages_run"]; !ok {
+		t.Error("response missing 'stages_run' field")
+	}
+	if _, ok := inner["dry_run"]; !ok {
+		t.Error("response missing 'dry_run' field")
+	}
+	dryRun, _ := inner["dry_run"].(bool)
+	if dryRun {
+		t.Error("expected dry_run=false by default, got true")
+	}
+}
+
+func TestHandleReplayEnrichment_MissingVault(t *testing.T) {
+	// When vault arg is empty string, resolveVault falls back to "default" (no error).
+	// Verify the handler succeeds with the default vault injection.
+	srv := newTestServerWith(&replayEnrichEngine{})
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_replay_enrichment","arguments":{"vault":""}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	// resolveVault injects "default" when vault arg is absent or empty — no error expected.
+	if resp.Error != nil {
+		t.Errorf("expected success with default vault injection, got error: %v", resp.Error)
+	}
+	inner := extractInnerJSON(t, resp)
+	if _, ok := inner["processed"]; !ok {
+		t.Error("response missing 'processed' field")
+	}
+}
+
+func TestHandleReplayEnrichment_DryRun(t *testing.T) {
+	srv := newTestServerWith(&replayEnrichEngine{})
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_replay_enrichment","arguments":{"vault":"default","dry_run":true}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	inner := extractInnerJSON(t, resp)
+
+	dryRun, _ := inner["dry_run"].(bool)
+	if !dryRun {
+		t.Error("expected dry_run=true in response, got false")
+	}
+}
+
+func TestHandleReplayEnrichment_EngineError(t *testing.T) {
+	srv := newTestServerWith(&replayEnrichEngine{err: fmt.Errorf("enrichment pipeline not configured")})
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_replay_enrichment","arguments":{"vault":"default"}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error == nil || resp.Error.Code != -32000 {
+		t.Errorf("expected -32000 for engine error, got %v", resp.Error)
+	}
+}
+
+func TestHandleReplayEnrichment_WithStages(t *testing.T) {
+	srv := newTestServerWith(&replayEnrichEngine{})
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_replay_enrichment","arguments":{"vault":"default","stages":["summary","classification"],"limit":10}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error != nil {
+		t.Errorf("unexpected error: %v", resp.Error)
+	}
+	inner := extractInnerJSON(t, resp)
+	if inner["processed"] == nil {
+		t.Error("response missing 'processed' field")
 	}
 }
