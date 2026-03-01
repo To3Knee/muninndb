@@ -75,6 +75,9 @@ func (rp *RetroactiveProcessor) Stop() {
 		rp.cancelFn()
 	}
 	rp.wg.Wait()
+	rp.statsMu.Lock()
+	rp.stats.Status = "stopped"
+	rp.statsMu.Unlock()
 }
 
 // Stats returns a copy of the current processor statistics.

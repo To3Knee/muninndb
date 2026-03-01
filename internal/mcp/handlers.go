@@ -356,6 +356,7 @@ func (s *MCPServer) handleStatus(ctx context.Context, w http.ResponseWriter, id 
 		TotalMemories:  resp.EngramCount,
 		Health:         "good",
 		EnrichmentMode: enrichMode,
+		// Plugins: populated in a future task when plugin registry is accessible via handleStatus.
 	}
 	sendResult(w, id, textContent(mustJSON(status)))
 }
