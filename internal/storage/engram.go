@@ -448,6 +448,36 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 		revIter.Close()
 	}
 
+	// Ordinal cleanup: scan all ordinal keys in this workspace and delete any where
+	// this engram is the child (bytes [25:41] == id).
+	// Key: 0x1E|ws(8)|parentID(16)|childID(16) = 41 bytes; childID at [25:41].
+	ordinalPrefix := keys.OrdinalWorkspacePrefix(wsPrefix)
+	ordIter, ordErr := PrefixIterator(ps.db, ordinalPrefix)
+	if ordErr == nil {
+		idBytes := [16]byte(id)
+		for ordIter.First(); ordIter.Valid(); ordIter.Next() {
+			k := ordIter.Key()
+			if len(k) != 41 {
+				continue
+			}
+			if bytes.Equal(k[25:41], idBytes[:]) {
+				batch.Delete(k, nil)
+			}
+		}
+		ordIter.Close()
+	}
+
+	// Also clean up ordinal keys where the deleted engram was a parent.
+	// These are keys of the form 0x1E|ws|deletedID|childID.
+	parentPrefix := keys.OrdinalPrefixForParent(wsPrefix, [16]byte(id))
+	parentIter, parentIterErr := PrefixIterator(ps.db, parentPrefix)
+	if parentIterErr == nil {
+		for parentIter.First(); parentIter.Valid(); parentIter.Next() {
+			batch.Delete(parentIter.Key(), nil)
+		}
+		parentIter.Close()
+	}
+
 	if err := batch.Commit(pebble.NoSync); err != nil {
 		return fmt.Errorf("delete engram: %w", err)
 	}
@@ -516,8 +546,10 @@ func (ps *PebbleStore) SoftDelete(ctx context.Context, wsPrefix [8]byte, id ULID
 		return fmt.Errorf("commit batch: %w", err)
 	}
 
-	// Update cache (vault-scoped).
+	// Update cache (vault-scoped) and invalidate the metadata-only cache
+	// so subsequent GetMetadata calls see the updated StateSoftDeleted state.
 	ps.cache.Set(wsPrefix, id, eng)
+	ps.metaCache.Remove([16]byte(id))
 
 	return nil
 }

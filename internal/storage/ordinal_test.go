@@ -106,3 +106,39 @@ func TestListChildOrdinals_Empty(t *testing.T) {
 		t.Fatalf("expected 0 entries for parent with no children, got %d", len(entries))
 	}
 }
+
+func TestDeleteEngramOrdinal(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("delete-ordinal-test")
+
+	parent := NewULID()
+	child := NewULID()
+
+	// Write ordinal.
+	if err := store.WriteOrdinal(ctx, ws, parent, child, 1); err != nil {
+		t.Fatal(err)
+	}
+	// Verify it exists.
+	_, found, err := store.ReadOrdinal(ctx, ws, parent, child)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("ordinal should exist after write")
+	}
+
+	// Delete via DeleteEngramOrdinal.
+	if err := store.DeleteEngramOrdinal(ctx, ws, parent, child); err != nil {
+		t.Fatalf("DeleteEngramOrdinal: %v", err)
+	}
+
+	// Verify gone.
+	_, found, err = store.ReadOrdinal(ctx, ws, parent, child)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found {
+		t.Error("ordinal should be removed after DeleteEngramOrdinal")
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/scrypster/muninndb/internal/auth"
@@ -289,6 +290,14 @@ func (s *MCPServer) handleForget(ctx context.Context, w http.ResponseWriter, id 
 	_, err := s.engine.Forget(ctx, &mbp.ForgetRequest{ID: engramID, Hard: false, Vault: vault})
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
+		return
+	}
+
+	// Check if the forgotten engram had children. Ordinal keys for children are NOT
+	// cleaned up when the parent is soft-deleted, so CountChildren will still find them.
+	childCount, warnErr := s.engine.CountChildren(ctx, vault, engramID)
+	if warnErr == nil && childCount > 0 {
+		sendResult(w, id, textContent(fmt.Sprintf(`{"ok":true,"warning":"engram had %d child(ren) which are now orphaned; consider forgetting them too"}`, childCount)))
 		return
 	}
 	sendResult(w, id, textContent(`{"ok":true}`))
@@ -650,6 +659,10 @@ func (s *MCPServer) handleRememberTree(ctx context.Context, w http.ResponseWrite
 		sendError(w, id, -32602, "invalid params: root must match TreeNodeInput schema")
 		return
 	}
+	if strings.TrimSpace(rootInput.Concept) == "" {
+		sendError(w, id, -32602, "invalid params: root.concept is required")
+		return
+	}
 	req := &RememberTreeRequest{Vault: vault, Root: rootInput}
 	result, err := s.engine.RememberTree(ctx, req)
 	if err != nil {
@@ -659,6 +672,15 @@ func (s *MCPServer) handleRememberTree(ctx context.Context, w http.ResponseWrite
 	sendResult(w, id, textContent(mustJSON(result)))
 }
 
+// handleRecallTree handles the muninn_recall_tree tool call.
+//
+// Behavior notes:
+//   - max_depth is capped to 50; negative values are normalized to 0 (unlimited).
+//   - limit is capped to 1000 per-node children to prevent runaway responses.
+//   - include_completed=false filters CHILDREN only. If the root itself is
+//     soft-deleted, it is still returned — the caller explicitly requested this
+//     root by ID, so the root is always returned regardless of its state. The
+//     include_completed flag is a child-level filter, not a root-level guard.
 func (s *MCPServer) handleRecallTree(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
 	rootID, ok := args["root_id"].(string)
 	if !ok || rootID == "" {
@@ -668,10 +690,19 @@ func (s *MCPServer) handleRecallTree(ctx context.Context, w http.ResponseWriter,
 	maxDepth := 10
 	if d, ok := args["max_depth"].(float64); ok {
 		maxDepth = int(d)
+		if maxDepth < 0 {
+			maxDepth = 0 // 0 = unlimited; normalize negative values
+		}
+		if maxDepth > 50 {
+			maxDepth = 50
+		}
 	}
 	limit := 0
 	if l, ok := args["limit"].(float64); ok && l > 0 {
 		limit = int(l)
+		if limit > 1000 {
+			limit = 1000 // cap per-node child limit
+		}
 	}
 	includeCompleted := true
 	if ic, ok := args["include_completed"].(bool); ok {
@@ -692,7 +723,7 @@ func (s *MCPServer) handleAddChild(ctx context.Context, w http.ResponseWriter, i
 		return
 	}
 	concept, ok := args["concept"].(string)
-	if !ok || concept == "" {
+	if !ok || strings.TrimSpace(concept) == "" {
 		sendError(w, id, -32602, "invalid params: 'concept' is required")
 		return
 	}

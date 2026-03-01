@@ -763,6 +763,53 @@ func TestHandleRead_MissingID(t *testing.T) {
 
 // ── muninn_forget ────────────────────────────────────────────────────────────
 
+// forgetWithChildrenEngine simulates a parent that has children registered in the ordinal index.
+type forgetWithChildrenEngine struct {
+	fakeEngine
+	childCount int
+}
+
+func (e *forgetWithChildrenEngine) CountChildren(_ context.Context, _ string, _ string) (int, error) {
+	return e.childCount, nil
+}
+
+func TestHandleForget_OrphanWarning(t *testing.T) {
+	// Engine reports that the forgotten engram had 2 children.
+	eng := &forgetWithChildrenEngine{childCount: 2}
+	srv := newTestServerWith(eng)
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_forget","arguments":{"vault":"default","id":"parent-123"}}}`
+	w := postRPC(t, srv, body)
+	content := extractInnerJSON(t, decodeResp(t, w.Body.String()))
+
+	ok, _ := content["ok"].(bool)
+	if !ok {
+		t.Errorf("expected ok=true in response, got %v", content["ok"])
+	}
+	warning, hasWarning := content["warning"].(string)
+	if !hasWarning || warning == "" {
+		t.Errorf("expected non-empty warning field when parent has children, got %v", content["warning"])
+	}
+	if !strings.Contains(warning, "orphaned") {
+		t.Errorf("warning message should contain 'orphaned', got: %s", warning)
+	}
+}
+
+func TestHandleForget_NoWarning(t *testing.T) {
+	// Default fakeEngine returns 0 children — no warning expected.
+	srv := newTestServer()
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_forget","arguments":{"vault":"default","id":"leaf-456"}}}`
+	w := postRPC(t, srv, body)
+	content := extractInnerJSON(t, decodeResp(t, w.Body.String()))
+
+	ok, _ := content["ok"].(bool)
+	if !ok {
+		t.Errorf("expected ok=true in response, got %v", content["ok"])
+	}
+	if _, hasWarning := content["warning"]; hasWarning {
+		t.Errorf("expected no warning field for leaf engram, but got: %v", content["warning"])
+	}
+}
+
 func TestHandleForget_HappyPath(t *testing.T) {
 	srv := newTestServer()
 	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_forget","arguments":{"vault":"default","id":"abc-123"}}}`

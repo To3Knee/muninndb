@@ -47,6 +47,12 @@ func (ps *PebbleStore) DeleteOrdinal(ctx context.Context, wsPrefix [8]byte, pare
 	return nil
 }
 
+// DeleteEngramOrdinal removes the ordinal key for (parentID, childID).
+// Delegates to DeleteOrdinal; named for clarity at engram-delete call sites.
+func (ps *PebbleStore) DeleteEngramOrdinal(ctx context.Context, wsPrefix [8]byte, parentID, childID ULID) error {
+	return ps.DeleteOrdinal(ctx, wsPrefix, parentID, childID)
+}
+
 // ListChildOrdinals returns all (childID, ordinal) pairs for parentID,
 // sorted by ordinal ascending.
 func (ps *PebbleStore) ListChildOrdinals(ctx context.Context, wsPrefix [8]byte, parentID ULID) ([]OrdinalEntry, error) {

@@ -92,6 +92,9 @@ func (f *fakeEngine) RecallTree(_ context.Context, vault, rootID string, maxDept
 func (f *fakeEngine) AddChild(_ context.Context, vault, parentID string, child *AddChildRequest) (*AddChildResult, error) {
 	return &AddChildResult{ChildID: "fake-child-id", Ordinal: 1}, nil
 }
+func (f *fakeEngine) CountChildren(_ context.Context, vault, engramID string) (int, error) {
+	return 0, nil
+}
 
 func newTestServer() *MCPServer {
 	return New(":0", &fakeEngine{}, "", nil)

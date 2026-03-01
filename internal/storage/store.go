@@ -138,6 +138,11 @@ type EngineStore interface {
 	// DeleteOrdinal removes the ordinal key for (parentID, childID). No-op if absent.
 	DeleteOrdinal(ctx context.Context, wsPrefix [8]byte, parentID, childID ULID) error
 
+	// DeleteEngramOrdinal removes the ordinal key for (parentID, childID).
+	// Called by the engram delete hook to clean up tree membership when a child
+	// engram is deleted. No-op if the key does not exist.
+	DeleteEngramOrdinal(ctx context.Context, wsPrefix [8]byte, parentID, childID ULID) error
+
 	// ListChildOrdinals returns all (childID, ordinal) pairs for parentID,
 	// sorted by ordinal ascending.
 	ListChildOrdinals(ctx context.Context, wsPrefix [8]byte, parentID ULID) ([]OrdinalEntry, error)

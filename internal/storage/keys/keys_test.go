@@ -155,6 +155,34 @@ func TestOrdinalPrefixForParent(t *testing.T) {
 	}
 }
 
+func TestOrdinalWorkspacePrefix(t *testing.T) {
+	ws := [8]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}
+	wsPfx := OrdinalWorkspacePrefix(ws)
+
+	// Must be exactly 9 bytes: 0x1E | ws(8).
+	if len(wsPfx) != 9 {
+		t.Fatalf("OrdinalWorkspacePrefix length: got %d, want 9", len(wsPfx))
+	}
+	if wsPfx[0] != 0x1E {
+		t.Fatalf("OrdinalWorkspacePrefix prefix byte: got 0x%02X, want 0x1E", wsPfx[0])
+	}
+	for i, b := range ws {
+		if wsPfx[1+i] != b {
+			t.Fatalf("OrdinalWorkspacePrefix ws byte %d: got 0x%02X, want 0x%02X", i, wsPfx[1+i], b)
+		}
+	}
+
+	// OrdinalWorkspacePrefix must be a proper byte-for-byte prefix of OrdinalKey.
+	parent := [16]byte{0x10}
+	child := [16]byte{0x20}
+	full := OrdinalKey(ws, parent, child)
+	for i := 0; i < len(wsPfx); i++ {
+		if wsPfx[i] != full[i] {
+			t.Errorf("OrdinalWorkspacePrefix[%d] = 0x%02X, want 0x%02X (from OrdinalKey)", i, wsPfx[i], full[i])
+		}
+	}
+}
+
 func TestEmbeddingKey(t *testing.T) {
 	var ws [8]byte
 	var id [16]byte

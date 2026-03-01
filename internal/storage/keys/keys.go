@@ -490,6 +490,16 @@ func OrdinalPrefixForParent(ws [8]byte, parentID [16]byte) []byte {
 	return key
 }
 
+// OrdinalWorkspacePrefix returns a 9-byte scan prefix covering ALL ordinal keys
+// in a workspace (0x1E | ws(8)). Used by DeleteEngram to find all ordinal entries
+// where the deleted engram is a child.
+func OrdinalWorkspacePrefix(ws [8]byte) []byte {
+	key := make([]byte, 1+8)
+	key[0] = 0x1E
+	copy(key[1:9], ws[:])
+	return key
+}
+
 // IncrementWSPrefix returns the next workspace prefix for use as an exclusive
 // upper bound in Pebble range operations.
 func IncrementWSPrefix(ws [8]byte) ([8]byte, error) {

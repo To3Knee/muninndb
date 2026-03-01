@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/scrypster/muninndb/internal/storage"
@@ -55,26 +56,163 @@ type AddChildResult struct {
 	Ordinal int32
 }
 
-// RememberTree writes all nodes, associations, and ordinal keys depth-first;
-// on failure, already-written nodes are left in storage.
-// Returns the root ID and a map of concept → ULID.
-func (e *Engine) RememberTree(ctx context.Context, req *RememberTreeRequest) (*RememberTreeResult, error) {
-	ws := e.store.ResolveVaultPrefix(req.Vault)
-	nodeMap := make(map[string]string)
+// maxTreeDepth is the maximum allowed nesting depth for a RememberTree input.
+// Trees deeper than this are rejected before any writes occur.
+const maxTreeDepth = 20
 
-	rootID, err := e.writeTreeNode(ctx, ws, req.Vault, req.Root, nil, 0, nodeMap)
-	if err != nil {
+// validateTreeNode checks that a node and all its descendants have non-empty
+// concepts, do not exceed maxTreeDepth levels of nesting, and contain no
+// duplicate concept strings anywhere in the tree.
+func validateTreeNode(node TreeNodeInput, depth int) error {
+	seen := make(map[string]bool)
+	return validateTreeNodeInner(node, depth, seen)
+}
+
+// validateTreeNodeInner is the recursive helper for validateTreeNode.
+// seen tracks all concept strings encountered so far across the whole tree so
+// that a duplicate anywhere — including across separate branches — is caught.
+func validateTreeNodeInner(node TreeNodeInput, depth int, seen map[string]bool) error {
+	if strings.TrimSpace(node.Concept) == "" {
+		return fmt.Errorf("tree node at depth %d has empty concept", depth)
+	}
+	if depth > maxTreeDepth {
+		return fmt.Errorf("tree depth exceeds maximum of %d levels", maxTreeDepth)
+	}
+	if seen[node.Concept] {
+		return fmt.Errorf("duplicate concept %q at depth %d", node.Concept, depth)
+	}
+	seen[node.Concept] = true
+	for _, child := range node.Children {
+		if err := validateTreeNodeInner(child, depth+1, seen); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// flatTreeItem is a single node in the flattened tree representation used by
+// the batch write path of RememberTree.
+type flatTreeItem struct {
+	input     TreeNodeInput
+	parentIdx int   // -1 for root
+	ordinal   int32 // 0 for root (unused)
+}
+
+// flattenTree does a pre-order DFS traversal and returns a flat slice.
+// parentIdx for root is -1. Ordinals are 1-based per parent.
+func flattenTree(root TreeNodeInput) []flatTreeItem {
+	items := []flatTreeItem{}
+	var dfs func(node TreeNodeInput, parentIdx int, ordinal int32)
+	dfs = func(node TreeNodeInput, parentIdx int, ordinal int32) {
+		idx := len(items)
+		items = append(items, flatTreeItem{input: node, parentIdx: parentIdx, ordinal: ordinal})
+		for i, child := range node.Children {
+			dfs(child, idx, int32(i+1))
+		}
+	}
+	dfs(root, -1, 0)
+	return items
+}
+
+// rollbackTree attempts to hard-delete engrams that were already written when a
+// subsequent wiring step fails. Errors are swallowed because this is a
+// best-effort cleanup — the caller already has a real error to return.
+func (e *Engine) rollbackTree(ctx context.Context, vault string, ids []string) {
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		_, _ = e.Forget(ctx, &mbp.ForgetRequest{ID: id, Hard: true, Vault: vault})
+	}
+}
+
+// RememberTree writes all nodes, associations, and ordinal keys using batched
+// writes to reduce I/O overhead. On Phase 2 (wiring) failure, already-written
+// engrams are hard-deleted via a best-effort rollback. Returns the root ID and
+// a map of concept → ULID.
+func (e *Engine) RememberTree(ctx context.Context, req *RememberTreeRequest) (*RememberTreeResult, error) {
+	if err := validateTreeNode(req.Root, 0); err != nil {
 		return nil, fmt.Errorf("RememberTree: %w", err)
 	}
+	ws := e.store.ResolveVaultPrefix(req.Vault)
+	items := flattenTree(req.Root)
 
-	return &RememberTreeResult{
-		RootID:  rootID.String(),
-		NodeMap: nodeMap,
-	}, nil
+	// Build write requests.
+	reqs := make([]*mbp.WriteRequest, len(items))
+	for i, item := range items {
+		wr := &mbp.WriteRequest{Vault: req.Vault, Concept: item.input.Concept, Content: item.input.Content, Tags: item.input.Tags}
+		if item.input.Type != "" {
+			if mt, ok := storage.ParseMemoryType(item.input.Type); ok {
+				wr.MemoryType = uint8(mt)
+			} else {
+				wr.TypeLabel = item.input.Type
+			}
+		}
+		reqs[i] = wr
+	}
+
+	// Batch write (chunk into MaxBatchSize slices).
+	ids := make([]storage.ULID, len(items))
+	idStrings := make([]string, len(items))
+	writtenCount := 0
+	for start := 0; start < len(reqs); start += MaxBatchSize {
+		end := start + MaxBatchSize
+		if end > len(reqs) {
+			end = len(reqs)
+		}
+		resps, errs := e.WriteBatch(ctx, reqs[start:end])
+		for j, batchErr := range errs {
+			if batchErr != nil {
+				e.rollbackTree(ctx, req.Vault, idStrings[:writtenCount])
+				return nil, fmt.Errorf("RememberTree: write node %q: %w", items[start+j].input.Concept, batchErr)
+			}
+			id, err := storage.ParseULID(resps[j].ID)
+			if err != nil {
+				e.rollbackTree(ctx, req.Vault, idStrings[:writtenCount])
+				return nil, fmt.Errorf("RememberTree: parse ULID %q: %w", resps[j].ID, err)
+			}
+			ids[start+j] = id
+			idStrings[start+j] = resps[j].ID
+			writtenCount++
+		}
+	}
+
+	// Wire associations and ordinals (second pass).
+	// On any failure, roll back all written engrams before returning.
+	for i, item := range items {
+		if item.parentIdx >= 0 {
+			parentID := ids[item.parentIdx]
+			assoc := &storage.Association{
+				TargetID:   parentID,
+				RelType:    storage.RelIsPartOf,
+				Weight:     1.0,
+				Confidence: 1.0,
+				CreatedAt:  time.Now(),
+			}
+			if err := e.store.WriteAssociation(ctx, ws, ids[i], parentID, assoc); err != nil {
+				e.rollbackTree(ctx, req.Vault, idStrings)
+				return nil, fmt.Errorf("RememberTree: write association for %q: %w", item.input.Concept, err)
+			}
+			if err := e.store.WriteOrdinal(ctx, ws, parentID, ids[i], item.ordinal); err != nil {
+				e.rollbackTree(ctx, req.Vault, idStrings)
+				return nil, fmt.Errorf("RememberTree: write ordinal for %q: %w", item.input.Concept, err)
+			}
+		}
+	}
+
+	// Build nodeMap.
+	nodeMap := make(map[string]string, len(items))
+	for i, item := range items {
+		nodeMap[item.input.Concept] = idStrings[i]
+	}
+
+	return &RememberTreeResult{RootID: idStrings[0], NodeMap: nodeMap}, nil
 }
 
 // writeTreeNode writes a single node and all its children recursively (depth-first).
 // Returns the ULID of the written engram.
+// Deprecated: RememberTree now uses the batch path via WriteBatch. This helper
+// is retained for use by existing test helpers.
 func (e *Engine) writeTreeNode(
 	ctx context.Context,
 	ws [8]byte,
@@ -142,13 +280,45 @@ func (e *Engine) writeTreeNode(
 	return id, nil
 }
 
+// CountChildren returns the number of direct children of engramID registered in the
+// ordinal index. This is safe to call after a soft-delete of the parent because
+// soft-delete does not clean up ordinal keys where the deleted engram is the parent.
+func (e *Engine) CountChildren(ctx context.Context, vault, engramID string) (int, error) {
+	ws := e.store.ResolveVaultPrefix(vault)
+	pid, err := storage.ParseULID(engramID)
+	if err != nil {
+		return 0, fmt.Errorf("count children: parse id: %w", err)
+	}
+	entries, err := e.store.ListChildOrdinals(ctx, ws, pid)
+	if err != nil {
+		return 0, fmt.Errorf("count children: %w", err)
+	}
+	return len(entries), nil
+}
+
 // AddChild writes a single child engram, wires the is_part_of association (child → parent),
 // and assigns an ordinal key. If input.Ordinal is nil, appends after the last existing child.
 func (e *Engine) AddChild(ctx context.Context, vault, parentID string, input *AddChildInput) (*AddChildResult, error) {
+	if input == nil {
+		return nil, fmt.Errorf("add child: input must not be nil")
+	}
 	ws := e.store.ResolveVaultPrefix(vault)
 	pid, err := storage.ParseULID(parentID)
 	if err != nil {
 		return nil, fmt.Errorf("add child: parse parent id: %w", err)
+	}
+
+	// Verify parent exists and is active or archived.
+	parentEng, err := e.store.GetEngram(ctx, ws, pid)
+	if err != nil {
+		return nil, fmt.Errorf("add child: read parent %s: %w", parentID, err)
+	}
+	if parentEng == nil {
+		return nil, fmt.Errorf("add child: parent %s not found", parentID)
+	}
+	if parentEng.State == storage.StateSoftDeleted || parentEng.State == storage.StateCompleted {
+		return nil, fmt.Errorf("add child: parent %s has state %s, must be active or archived",
+			parentID, lifecycleStateString(parentEng.State))
 	}
 
 	// Write the child engram.
@@ -187,23 +357,31 @@ func (e *Engine) AddChild(ctx context.Context, vault, parentID string, input *Ad
 	}
 
 	// Determine ordinal: explicit or append after max existing.
+	// When appending (Ordinal == nil), we must hold the per-parent mutex to
+	// serialize the read-modify-write so concurrent appends cannot collide.
 	ordinal := int32(1)
 	if input.Ordinal != nil {
 		ordinal = *input.Ordinal
+		if err := e.store.WriteOrdinal(ctx, ws, pid, cid, ordinal); err != nil {
+			return nil, fmt.Errorf("add child: write ordinal: %w", err)
+		}
 	} else {
+		mu := e.getChildMutex(parentID)
+		mu.Lock()
 		existing, err := e.store.ListChildOrdinals(ctx, ws, pid)
 		if err != nil {
+			mu.Unlock()
 			return nil, fmt.Errorf("add child: list ordinals: %w", err)
 		}
-		for _, entry := range existing {
-			if entry.Ordinal >= ordinal {
-				ordinal = entry.Ordinal + 1
-			}
+		// ListChildOrdinals is sorted ascending; the last entry has the max ordinal.
+		if len(existing) > 0 {
+			ordinal = existing[len(existing)-1].Ordinal + 1
 		}
-	}
-
-	if err := e.store.WriteOrdinal(ctx, ws, pid, cid, ordinal); err != nil {
-		return nil, fmt.Errorf("add child: write ordinal: %w", err)
+		writeErr := e.store.WriteOrdinal(ctx, ws, pid, cid, ordinal)
+		mu.Unlock()
+		if writeErr != nil {
+			return nil, fmt.Errorf("add child: write ordinal: %w", writeErr)
+		}
 	}
 
 	return &AddChildResult{ChildID: resp.ID, Ordinal: ordinal}, nil
@@ -237,7 +415,15 @@ func (e *Engine) RecallTree(ctx context.Context, vault, rootID string, maxDepth,
 		return nil, fmt.Errorf("parse root id: %w", err)
 	}
 
-	return e.recallTreeNode(ctx, ws, id, maxDepth, 0, limit, includeCompleted)
+	node, err := e.recallTreeNode(ctx, ws, id, maxDepth, 0, limit, includeCompleted)
+	if err != nil {
+		return nil, err
+	}
+	if node == nil {
+		// Root engram not found — this is a caller error (bad ID or already deleted).
+		return nil, fmt.Errorf("root engram %s not found", id.String())
+	}
+	return node, nil
 }
 
 // recallTreeNode recursively reads a node and its children up to maxDepth.
@@ -255,7 +441,10 @@ func (e *Engine) recallTreeNode(
 		return nil, fmt.Errorf("get engram %s: %w", id.String(), err)
 	}
 	if eng == nil {
-		return nil, fmt.Errorf("engram %s not found", id.String())
+		// Ghost engram: the key was deleted (e.g., hard-deleted between an
+		// ordinal write and now, or ordinal cleanup missed it on crash).
+		// Treat as a skip — return (nil, nil) so the caller can continue.
+		return nil, nil
 	}
 
 	var lastAccessed string
@@ -287,19 +476,44 @@ func (e *Engine) recallTreeNode(
 
 	node.Children = []TreeNode{}
 
+	// Batch metadata lookup: collect all child IDs and call GetMetadata once
+	// instead of once per child (avoids the N+1 query pattern).
+	var metaByID map[storage.ULID]*storage.EngramMeta
+	if !includeCompleted && len(ordinals) > 0 {
+		childIDs := make([]storage.ULID, len(ordinals))
+		for i, entry := range ordinals {
+			childIDs[i] = entry.ChildID
+		}
+		metas, err := e.store.GetMetadata(ctx, ws, childIDs)
+		if err != nil {
+			return nil, fmt.Errorf("get metadata for children of %s: %w", id.String(), err)
+		}
+		metaByID = make(map[storage.ULID]*storage.EngramMeta, len(ordinals))
+		for i, meta := range metas {
+			if i < len(ordinals) {
+				metaByID[ordinals[i].ChildID] = meta
+			}
+		}
+	}
+
 	for _, entry := range ordinals {
 		if !includeCompleted {
-			metas, err := e.store.GetMetadata(ctx, ws, []storage.ULID{entry.ChildID})
-			if err != nil || len(metas) == 0 || metas[0] == nil {
-				continue // skip unreadable children
-			}
-			if metas[0].State == storage.StateCompleted {
+			meta, ok := metaByID[entry.ChildID]
+			// Filter out: missing metadata (hard-deleted ghost), completed, or
+			// soft-deleted children. StateSoftDeleted != StateCompleted so both
+			// states must be checked explicitly.
+			if !ok || meta == nil || meta.State == storage.StateCompleted || meta.State == storage.StateSoftDeleted {
 				continue
 			}
 		}
 		child, err := e.recallTreeNode(ctx, ws, entry.ChildID, maxDepth, depth+1, limit, includeCompleted)
 		if err != nil {
 			return nil, err
+		}
+		if child == nil {
+			// Ghost engram: child was hard-deleted; ordinal key is stale.
+			// Skip it rather than panicking on nil dereference.
+			continue
 		}
 		child.Ordinal = entry.Ordinal
 		node.Children = append(node.Children, *child)

@@ -320,6 +320,105 @@ func TestDeleteEngram_RemovesRecord(t *testing.T) {
 	}
 }
 
+// TestDeleteEngram_AutoCleansOrdinalKey verifies that DeleteEngram atomically removes
+// any ordinal keys where the deleted engram is the child.
+func TestDeleteEngram_AutoCleansOrdinalKey(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("auto-ordinal-clean")
+
+	// Write parent and child engrams.
+	parentEng := &Engram{Concept: "parent", Content: "root"}
+	parentID, err := store.WriteEngram(ctx, ws, parentEng)
+	if err != nil {
+		t.Fatal(err)
+	}
+	childEng := &Engram{Concept: "child", Content: "leaf"}
+	childID, err := store.WriteEngram(ctx, ws, childEng)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Write ordinal key: parent → child at ordinal 1.
+	if err := store.WriteOrdinal(ctx, ws, parentID, childID, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify ordinal exists.
+	_, found, err := store.ReadOrdinal(ctx, ws, parentID, childID)
+	if err != nil || !found {
+		t.Fatalf("ordinal should exist after write: err=%v found=%v", err, found)
+	}
+
+	// Hard-delete the child engram.
+	if err := store.DeleteEngram(ctx, ws, childID); err != nil {
+		t.Fatalf("DeleteEngram: %v", err)
+	}
+
+	// Ordinal key must be gone automatically.
+	_, found, err = store.ReadOrdinal(ctx, ws, parentID, childID)
+	if err != nil {
+		t.Fatalf("ReadOrdinal after delete: %v", err)
+	}
+	if found {
+		t.Error("ordinal key should be automatically removed when child engram is deleted")
+	}
+}
+
+// TestDeleteEngram_AutoCleansParentOrdinalKeys verifies that DeleteEngram atomically
+// removes all ordinal keys where the deleted engram was the parent
+// (i.e. keys of the form 0x1E|ws|deletedID|childID).
+func TestDeleteEngram_AutoCleansParentOrdinalKeys(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("auto-parent-ordinal-clean")
+
+	// Write parent P and children C1, C2.
+	parentID, err := store.WriteEngram(ctx, ws, &Engram{Concept: "parent", Content: "root"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c1ID, err := store.WriteEngram(ctx, ws, &Engram{Concept: "child1", Content: "leaf1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c2ID, err := store.WriteEngram(ctx, ws, &Engram{Concept: "child2", Content: "leaf2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Register both children under P with ordinals.
+	if err := store.WriteOrdinal(ctx, ws, parentID, c1ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteOrdinal(ctx, ws, parentID, c2ID, 2); err != nil {
+		t.Fatal(err)
+	}
+
+	// Sanity check: both ordinal keys exist before deleting the parent.
+	entries, err := store.ListChildOrdinals(ctx, ws, parentID)
+	if err != nil {
+		t.Fatalf("ListChildOrdinals before delete: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 child ordinals before delete, got %d", len(entries))
+	}
+
+	// Hard-delete the parent engram P.
+	if err := store.DeleteEngram(ctx, ws, parentID); err != nil {
+		t.Fatalf("DeleteEngram(parent): %v", err)
+	}
+
+	// All parent-role ordinal keys must be gone automatically.
+	entries, err = store.ListChildOrdinals(ctx, ws, parentID)
+	if err != nil {
+		t.Fatalf("ListChildOrdinals after delete: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected 0 child ordinals after parent deleted, got %d", len(entries))
+	}
+}
+
 // TestDeleteEngram_WithAssociations writes two engrams, links A->B, deletes A,
 // and verifies that the association forward and reverse keys are removed from
 // Pebble so GetAssociations (on a fresh, cache-cold store) returns no edges from A.

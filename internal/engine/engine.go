@@ -106,6 +106,10 @@ type Engine struct {
 	// vaultMu provides per-vault mutual exclusion for destructive vault operations
 	// (PruneVault, ReindexFTSVault, ClearVault). Maps string vault name → *sync.Mutex.
 	vaultMu sync.Map
+
+	// childMu serializes the read-modify-write ordinal assignment in AddChild
+	// when Ordinal is nil (append mode). Maps parent ULID string → *sync.Mutex.
+	childMu sync.Map
 }
 
 // SetOnWrite registers a callback invoked after every successful Write.
@@ -154,6 +158,14 @@ func (e *Engine) fastQueryID() string {
 // ClearVault) so concurrent calls on the same vault cannot corrupt state.
 func (e *Engine) getVaultMutex(name string) *sync.Mutex {
 	mu, _ := e.vaultMu.LoadOrStore(name, &sync.Mutex{})
+	return mu.(*sync.Mutex)
+}
+
+// getChildMutex returns the per-parent mutex for parentID, creating it if needed.
+// Used to serialize the read-modify-write ordinal assignment in AddChild (append mode)
+// so concurrent appends to the same parent cannot produce duplicate ordinals.
+func (e *Engine) getChildMutex(parentID string) *sync.Mutex {
+	mu, _ := e.childMu.LoadOrStore(parentID, &sync.Mutex{})
 	return mu.(*sync.Mutex)
 }
 

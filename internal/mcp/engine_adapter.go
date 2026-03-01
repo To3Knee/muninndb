@@ -254,6 +254,10 @@ func (a *mcpEngineAdapter) RecallTree(ctx context.Context, vault, rootID string,
 	return &RecallTreeResult{Root: convertTreeNode(node)}, nil
 }
 
+func (a *mcpEngineAdapter) CountChildren(ctx context.Context, vault, engramID string) (int, error) {
+	return a.eng.CountChildren(ctx, vault, engramID)
+}
+
 func (a *mcpEngineAdapter) AddChild(ctx context.Context, vault, parentID string, child *AddChildRequest) (*AddChildResult, error) {
 	input := &engine.AddChildInput{
 		Concept: child.Concept,

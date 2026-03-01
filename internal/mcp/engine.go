@@ -70,4 +70,9 @@ type EngineInterface interface {
 	// AddChild adds a single engram as a child of parentID, writing the is_part_of
 	// association and ordinal key. ordinal=nil appends after the last existing child.
 	AddChild(ctx context.Context, vault, parentID string, child *AddChildRequest) (*AddChildResult, error)
+
+	// CountChildren returns the number of direct children registered under engramID
+	// via the ordinal index. Returns 0 if the engram has no children or if the
+	// engramID is invalid.
+	CountChildren(ctx context.Context, vault, engramID string) (int, error)
 }
