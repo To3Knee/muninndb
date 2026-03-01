@@ -153,6 +153,61 @@ func TestUpsertEntityRecord_UpdatesWhenHigherConfidence(t *testing.T) {
 	assert.Equal(t, "plugin:enrich", got.Source)
 }
 
+func TestEntityReverseIndex_WrittenOnLink(t *testing.T) {
+	ps := newTestStore(t)
+	ctx := context.Background()
+
+	ws := ps.VaultPrefix("test")
+	engID := NewULID()
+
+	require.NoError(t, ps.UpsertEntityRecord(ctx, EntityRecord{
+		Name: "PostgreSQL", Type: "technology", Confidence: 0.8,
+	}, "test"))
+	require.NoError(t, ps.WriteEntityEngramLink(ctx, ws, engID, "PostgreSQL"))
+
+	var found []ULID
+	err := ps.ScanEntityEngrams(ctx, "PostgreSQL", func(gotWS [8]byte, id ULID) error {
+		found = append(found, id)
+		return nil
+	})
+	require.NoError(t, err)
+	require.Len(t, found, 1)
+	assert.Equal(t, engID, found[0])
+}
+
+func TestEntityReverseIndex_MultipleEngrams(t *testing.T) {
+	ps := newTestStore(t)
+	ctx := context.Background()
+	ws := ps.VaultPrefix("test")
+
+	require.NoError(t, ps.UpsertEntityRecord(ctx, EntityRecord{
+		Name: "Go", Type: "technology", Confidence: 0.7,
+	}, "test"))
+
+	id1, id2 := NewULID(), NewULID()
+	require.NoError(t, ps.WriteEntityEngramLink(ctx, ws, id1, "Go"))
+	require.NoError(t, ps.WriteEntityEngramLink(ctx, ws, id2, "Go"))
+
+	var found []ULID
+	require.NoError(t, ps.ScanEntityEngrams(ctx, "Go", func(_ [8]byte, id ULID) error {
+		found = append(found, id)
+		return nil
+	}))
+	assert.Len(t, found, 2)
+}
+
+func TestEntityReverseIndex_EmptyForUnknownEntity(t *testing.T) {
+	ps := newTestStore(t)
+	ctx := context.Background()
+
+	var found []ULID
+	require.NoError(t, ps.ScanEntityEngrams(ctx, "NonExistentEntity", func(_ [8]byte, id ULID) error {
+		found = append(found, id)
+		return nil
+	}))
+	assert.Empty(t, found)
+}
+
 func TestUpsertEntityRecord_ConcurrentPreservesHighestConfidence(t *testing.T) {
 	ps := newTestStore(t)
 	ctx := context.Background()

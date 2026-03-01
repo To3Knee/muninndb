@@ -577,3 +577,25 @@ func RelationshipKey(ws [8]byte, engramID [16]byte, fromHash [8]byte, relTypeByt
 	copy(key[34:42], toHash[:])
 	return key
 }
+
+// EntityReverseIndexKey constructs the entity→engram reverse index key (0x23 prefix).
+// Enables "which engrams mention entity X?" queries by scanning 0x23|nameHash prefix.
+// Key: 0x23 | nameHash(8) | wsPrefix(8) | engramID(16) = 33 bytes
+// Value: empty (all data is encoded in the key).
+func EntityReverseIndexKey(nameHash [8]byte, ws [8]byte, engramID [16]byte) []byte {
+	key := make([]byte, 1+8+8+16)
+	key[0] = 0x23
+	copy(key[1:9], nameHash[:])
+	copy(key[9:17], ws[:])
+	copy(key[17:33], engramID[:])
+	return key
+}
+
+// EntityReverseIndexPrefix returns a 9-byte prefix for scanning all engrams
+// that mention a given entity (0x23 | nameHash(8)).
+func EntityReverseIndexPrefix(nameHash [8]byte) []byte {
+	key := make([]byte, 1+8)
+	key[0] = 0x23
+	copy(key[1:9], nameHash[:])
+	return key
+}

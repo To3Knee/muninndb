@@ -91,15 +91,62 @@ func (ps *PebbleStore) getEntityLock(name string) *sync.Mutex {
 	return m.(*sync.Mutex)
 }
 
-// WriteEntityEngramLink writes a vault-scoped engram→entity link at 0x20.
-// Callers MUST call UpsertEntityRecord first — this method does not verify the
-// entity record exists, and writing a link without a corresponding entity record
-// creates an orphaned 0x20 entry.
-// Value stored is the canonical entity name (UTF-8).
+// WriteEntityEngramLink writes a vault-scoped engram→entity link at 0x20
+// and the corresponding entity→engram reverse index entry at 0x23.
+// Both writes are committed atomically in a single Pebble batch.
+// Callers MUST call UpsertEntityRecord first — this method does not verify
+// the entity record exists.
 func (ps *PebbleStore) WriteEntityEngramLink(ctx context.Context, ws [8]byte, engramID ULID, entityName string) error {
 	nameHash := keys.EntityNameHash(entityName)
-	key := keys.EntityEngramLinkKey(ws, [16]byte(engramID), nameHash)
-	return ps.db.Set(key, []byte(entityName), pebble.NoSync)
+	fwdKey := keys.EntityEngramLinkKey(ws, [16]byte(engramID), nameHash)
+	revKey := keys.EntityReverseIndexKey(nameHash, ws, [16]byte(engramID))
+
+	batch := ps.db.NewBatch()
+	defer batch.Close()
+	if err := batch.Set(fwdKey, []byte(entityName), nil); err != nil {
+		return fmt.Errorf("write entity link fwd: %w", err)
+	}
+	if err := batch.Set(revKey, nil, nil); err != nil {
+		return fmt.Errorf("write entity link rev: %w", err)
+	}
+	return batch.Commit(pebble.NoSync)
+}
+
+// ScanEntityEngrams scans the 0x23 reverse index for all vault-scoped engrams
+// that mention the given entity name. Calls fn for each (ws, engramID) pair.
+func (ps *PebbleStore) ScanEntityEngrams(ctx context.Context, entityName string, fn func(ws [8]byte, engramID ULID) error) error {
+	nameHash := keys.EntityNameHash(entityName)
+	prefix := keys.EntityReverseIndexPrefix(nameHash)
+	upperBound := make([]byte, len(prefix))
+	copy(upperBound, prefix)
+	for i := len(upperBound) - 1; i >= 0; i-- {
+		upperBound[i]++
+		if upperBound[i] != 0 {
+			break
+		}
+	}
+
+	iter, err := ps.db.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: upperBound})
+	if err != nil {
+		return fmt.Errorf("scan entity engrams: iter: %w", err)
+	}
+	defer iter.Close()
+
+	for valid := iter.First(); valid; valid = iter.Next() {
+		k := iter.Key()
+		if len(k) != 33 { // 1 + 8 + 8 + 16
+			continue
+		}
+		var ws [8]byte
+		copy(ws[:], k[9:17])
+		var idBytes [16]byte
+		copy(idBytes[:], k[17:33])
+		id := ULID(idBytes)
+		if err := fn(ws, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // UpsertRelationshipRecord writes a vault-scoped relationship record at 0x21.

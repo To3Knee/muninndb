@@ -1,8 +1,10 @@
 package keys
 
 import (
+	"bytes"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -48,6 +50,7 @@ func TestKeyPrefixesAreUnique(t *testing.T) {
 		{"EntityKey", EntityKey([8]byte{})},
 		{"EntityEngramLinkKey", EntityEngramLinkKey([8]byte{}, [16]byte{}, [8]byte{})},
 		{"RelationshipKey", RelationshipKey([8]byte{}, [16]byte{}, [8]byte{}, 0x01, [8]byte{})},
+		{"EntityReverseIndexKey", EntityReverseIndexKey([8]byte{}, [8]byte{}, [16]byte{})},
 	}
 
 	seen := make(map[byte]string)
@@ -206,6 +209,24 @@ func TestEmbeddingKey(t *testing.T) {
 	if k[9] != 0x02 {
 		t.Errorf("EmbeddingKey id[0] = 0x%02x, want 0x02", k[9])
 	}
+}
+
+func TestEntityReverseIndexKey(t *testing.T) {
+	nameHash := [8]byte{1, 2, 3, 4, 5, 6, 7, 8}
+	ws := [8]byte{9, 10, 11, 12, 13, 14, 15, 16}
+	engramID := [16]byte{17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32}
+
+	k := EntityReverseIndexKey(nameHash, ws, engramID)
+	assert.Equal(t, byte(0x23), k[0])
+	assert.Equal(t, 33, len(k))
+	assert.Equal(t, nameHash[:], k[1:9])
+	assert.Equal(t, ws[:], k[9:17])
+	assert.Equal(t, engramID[:], k[17:33])
+
+	prefix := EntityReverseIndexPrefix(nameHash)
+	assert.Equal(t, byte(0x23), prefix[0])
+	assert.Equal(t, 9, len(prefix))
+	assert.True(t, bytes.HasPrefix(k, prefix))
 }
 
 func TestEntityNameHash_Normalizes(t *testing.T) {

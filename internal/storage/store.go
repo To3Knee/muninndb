@@ -171,6 +171,11 @@ type EngineStore interface {
 	// WriteEntityEngramLink writes a vault-scoped engram→entity link.
 	WriteEntityEngramLink(ctx context.Context, ws [8]byte, engramID ULID, entityName string) error
 
+	// ScanEntityEngrams scans the 0x23 reverse index for all vault-scoped (ws, engramID)
+	// pairs that mention the given entity name. Calls fn for each pair until fn returns
+	// a non-nil error or the index is exhausted.
+	ScanEntityEngrams(ctx context.Context, entityName string, fn func(ws [8]byte, engramID ULID) error) error
+
 	// UpsertRelationshipRecord writes a vault-scoped relationship record.
 	UpsertRelationshipRecord(ctx context.Context, ws [8]byte, engramID ULID, record RelationshipRecord) error
 
