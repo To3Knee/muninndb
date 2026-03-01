@@ -298,4 +298,51 @@ func TestUpsertEntityRecord_ConcurrentPreservesHighestConfidence(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.InDelta(t, float32(0.8), got.Confidence, 0.001, "highest confidence must survive concurrent writes")
+	assert.Equal(t, int32(21), got.MentionCount, "MentionCount must equal total concurrent writes")
+}
+
+func TestEntityRecord_MergedIntoPreservedOnUpsert(t *testing.T) {
+	ps := newTestPebbleStore(t)
+	ctx := context.Background()
+
+	// First write: entity is merged.
+	err := ps.UpsertEntityRecord(ctx, EntityRecord{
+		Name: "OldName", Type: "technology", Confidence: 0.8,
+		State: "merged", MergedInto: "CanonicalName",
+	}, "test")
+	require.NoError(t, err)
+
+	// Second write: caller doesn't set State or MergedInto.
+	err = ps.UpsertEntityRecord(ctx, EntityRecord{
+		Name: "OldName", Type: "technology", Confidence: 0.9,
+	}, "test")
+	require.NoError(t, err)
+
+	got, err := ps.GetEntityRecord(ctx, "OldName")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "merged", got.State, "State must be preserved")
+	assert.Equal(t, "CanonicalName", got.MergedInto, "MergedInto must be preserved")
+}
+
+func TestEntityRecord_InvalidStateReturnsError(t *testing.T) {
+	ps := newTestPebbleStore(t)
+	ctx := context.Background()
+
+	err := ps.UpsertEntityRecord(ctx, EntityRecord{
+		Name: "X", Type: "technology", Confidence: 0.8,
+		State: "invalid_state",
+	}, "test")
+	assert.Error(t, err, "invalid state should return error")
+}
+
+func TestEntityRecord_MergedIntoWithoutMergedStateReturnsError(t *testing.T) {
+	ps := newTestPebbleStore(t)
+	ctx := context.Background()
+
+	err := ps.UpsertEntityRecord(ctx, EntityRecord{
+		Name: "X", Type: "technology", Confidence: 0.8,
+		State: "active", MergedInto: "Y",
+	}, "test")
+	assert.Error(t, err, "MergedInto without State=merged should return error")
 }

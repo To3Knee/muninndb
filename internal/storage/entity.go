@@ -14,6 +14,11 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
+// validEntityStates is the set of allowed lifecycle state values.
+var validEntityStates = map[string]bool{
+	"active": true, "deprecated": true, "merged": true, "resolved": true,
+}
+
 // EntityRecord is a named entity stored at the global 0x1F key prefix.
 // Records are vault-agnostic; entity-engram links are vault-scoped at 0x20.
 type EntityRecord struct {
@@ -86,6 +91,20 @@ func (ps *PebbleStore) UpsertEntityRecord(ctx context.Context, record EntityReco
 
 	record.Source = source
 	record.UpdatedAt = time.Now().UnixNano()
+
+	// Validate state — default to "active" if empty, error if unrecognized.
+	if record.State == "" {
+		record.State = "active"
+	}
+	if !validEntityStates[record.State] {
+		return fmt.Errorf("upsert entity: invalid state %q (allowed: active, deprecated, merged, resolved)", record.State)
+	}
+
+	// MergedInto is only valid when State == "merged".
+	if record.MergedInto != "" && record.State != "merged" {
+		return fmt.Errorf("upsert entity: MergedInto requires State=merged, got State=%q", record.State)
+	}
+
 	val, err := msgpack.Marshal(record)
 	if err != nil {
 		return fmt.Errorf("entity record marshal: %w", err)
