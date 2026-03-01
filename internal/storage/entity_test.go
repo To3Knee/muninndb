@@ -208,6 +208,64 @@ func TestEntityReverseIndex_EmptyForUnknownEntity(t *testing.T) {
 	assert.Empty(t, found)
 }
 
+func TestEntityRecord_FirstSeenSetOnce(t *testing.T) {
+	ps := newTestStore(t)
+	ctx := context.Background()
+
+	// First upsert — FirstSeen should be set.
+	err := ps.UpsertEntityRecord(ctx, EntityRecord{
+		Name: "Go", Type: "technology", Confidence: 0.8,
+	}, "test")
+	require.NoError(t, err)
+
+	got, err := ps.GetEntityRecord(ctx, "Go")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.NotZero(t, got.FirstSeen, "FirstSeen must be set on first upsert")
+	firstSeen := got.FirstSeen
+
+	// Second upsert — FirstSeen must NOT change.
+	err = ps.UpsertEntityRecord(ctx, EntityRecord{
+		Name: "Go", Type: "technology", Confidence: 0.9,
+	}, "test")
+	require.NoError(t, err)
+
+	got2, err := ps.GetEntityRecord(ctx, "Go")
+	require.NoError(t, err)
+	assert.Equal(t, firstSeen, got2.FirstSeen, "FirstSeen must not change on second upsert")
+}
+
+func TestEntityRecord_MentionCountIncrementsOnUpsert(t *testing.T) {
+	ps := newTestStore(t)
+	ctx := context.Background()
+
+	for i := 0; i < 3; i++ {
+		err := ps.UpsertEntityRecord(ctx, EntityRecord{
+			Name: "Python", Type: "technology", Confidence: 0.7,
+		}, "test")
+		require.NoError(t, err)
+	}
+
+	got, err := ps.GetEntityRecord(ctx, "Python")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, int32(3), got.MentionCount, "MentionCount should be 3 after 3 upserts")
+}
+
+func TestEntityRecord_StateDefaultActive(t *testing.T) {
+	ps := newTestStore(t)
+	ctx := context.Background()
+
+	err := ps.UpsertEntityRecord(ctx, EntityRecord{
+		Name: "Rust", Type: "technology", Confidence: 0.8,
+	}, "test")
+	require.NoError(t, err)
+
+	got, err := ps.GetEntityRecord(ctx, "Rust")
+	require.NoError(t, err)
+	assert.Equal(t, "active", got.State, "default state must be 'active'")
+}
+
 func TestUpsertEntityRecord_ConcurrentPreservesHighestConfidence(t *testing.T) {
 	ps := newTestStore(t)
 	ctx := context.Background()

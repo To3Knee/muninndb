@@ -17,11 +17,15 @@ import (
 // EntityRecord is a named entity stored at the global 0x1F key prefix.
 // Records are vault-agnostic; entity-engram links are vault-scoped at 0x20.
 type EntityRecord struct {
-	Name       string  `msgpack:"name"`
-	Type       string  `msgpack:"type"`
-	Confidence float32 `msgpack:"confidence"`
-	Source     string  `msgpack:"source"`     // "inline", "plugin:enrich", etc.
-	UpdatedAt  int64   `msgpack:"updated_at"` // Unix nanos
+	Name         string  `msgpack:"name"`
+	Type         string  `msgpack:"type"`
+	Confidence   float32 `msgpack:"confidence"`
+	Source       string  `msgpack:"source"`        // "inline", "plugin:enrich", etc.
+	UpdatedAt    int64   `msgpack:"updated_at"`    // Unix nanos
+	FirstSeen    int64   `msgpack:"first_seen"`    // Unix nanos, set once on first upsert
+	MentionCount int32   `msgpack:"mention_count"` // incremented on every upsert
+	State        string  `msgpack:"state"`         // "active", "deprecated", "merged", "resolved"
+	MergedInto   string  `msgpack:"merged_into"`   // set when State == "merged"
 }
 
 // RelationshipRecord is a typed entity-to-entity relationship extracted from a specific engram.
@@ -52,8 +56,32 @@ func (ps *PebbleStore) UpsertEntityRecord(ctx context.Context, record EntityReco
 	if err != nil {
 		return fmt.Errorf("entity record read-before-write: %w", err)
 	}
-	if existing != nil && existing.Confidence > record.Confidence {
-		record.Confidence = existing.Confidence
+
+	if existing != nil {
+		// Preserve FirstSeen (set once, never overwritten).
+		if existing.FirstSeen != 0 {
+			record.FirstSeen = existing.FirstSeen
+		}
+		// Increment mention count.
+		record.MentionCount = existing.MentionCount + 1
+		// Preserve lifecycle state unless caller explicitly set it.
+		if record.State == "" {
+			record.State = existing.State
+		}
+		if record.MergedInto == "" {
+			record.MergedInto = existing.MergedInto
+		}
+		// Preserve higher confidence.
+		if existing.Confidence > record.Confidence {
+			record.Confidence = existing.Confidence
+		}
+	} else {
+		// First write.
+		record.FirstSeen = time.Now().UnixNano()
+		record.MentionCount = 1
+		if record.State == "" {
+			record.State = "active"
+		}
 	}
 
 	record.Source = source
