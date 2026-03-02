@@ -12,6 +12,9 @@ import (
 
 // WriteOrdinal atomically writes the ordinal value for (parentID, childID).
 func (ps *PebbleStore) WriteOrdinal(ctx context.Context, wsPrefix [8]byte, parentID, childID ULID, ordinal int32) error {
+	if ordinal < 0 {
+		return fmt.Errorf("ordinal must be non-negative, got %d", ordinal)
+	}
 	key := keys.OrdinalKey(wsPrefix, [16]byte(parentID), [16]byte(childID))
 	var val [4]byte
 	binary.BigEndian.PutUint32(val[:], uint32(ordinal))

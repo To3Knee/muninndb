@@ -793,7 +793,9 @@ func ctxVault(r *http.Request) string {
 func (s *Server) sendJSON(w http.ResponseWriter, statusCode int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
-	json.NewEncoder(w).Encode(data)
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		slog.Error("rest: failed to encode response", "err", err)
+	}
 }
 
 func (s *Server) sendError(r *http.Request, w http.ResponseWriter, statusCode int, code ErrorCode, message string) {

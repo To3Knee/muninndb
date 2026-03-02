@@ -655,7 +655,9 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	}
 
 	// Persist vault name for discovery (idempotent, cheap)
-	_ = e.store.WriteVaultName(wsPrefix, vaultName)
+	if err := e.store.WriteVaultName(wsPrefix, vaultName); err != nil {
+		slog.Warn("engine: failed to persist vault name", "vault", vaultName, "err", err)
+	}
 
 	// Submit to async FTS worker — decoupled from write hot path.
 	// Engram is already durable; FTS visibility follows within ~100ms.
@@ -1024,7 +1026,9 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 			_ = e.store.SetDigestFlag(ctx, id, plugin.DigestEnrich)
 		}
 
-		_ = e.store.WriteVaultName(p.wsPrefix, p.vaultName)
+		if err := e.store.WriteVaultName(p.wsPrefix, p.vaultName); err != nil {
+			slog.Warn("engine: failed to persist vault name", "vault", p.vaultName, "err", err)
+		}
 
 		if e.ftsWorker != nil {
 			e.ftsWorker.Submit(fts.IndexJob{
@@ -2055,7 +2059,9 @@ func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason st
 	}
 
 	// Persist vault name (idempotent).
-	_ = e.store.WriteVaultName(wsPrefix, vault)
+	if err := e.store.WriteVaultName(wsPrefix, vault); err != nil {
+		slog.Warn("engine: failed to persist vault name", "vault", vault, "err", err)
+	}
 
 	// Submit new engram to async FTS worker.
 	if e.ftsWorker != nil {
