@@ -26,29 +26,29 @@ type Association struct {
 
 // HelloRequest is the HELLO handshake payload.
 type HelloRequest struct {
-	Version      string   `msgpack:"version"`
-	AuthMethod   string   `msgpack:"auth_method"`
-	Token        string   `msgpack:"token,omitempty"`
-	Vault        string   `msgpack:"vault,omitempty"`
-	Client       string   `msgpack:"client,omitempty"`
-	Capabilities []string `msgpack:"capabilities,omitempty"`
+	Version      string   `msgpack:"version" json:"version"`
+	AuthMethod   string   `msgpack:"auth_method" json:"auth_method"`
+	Token        string   `msgpack:"token,omitempty" json:"token,omitempty"`
+	Vault        string   `msgpack:"vault,omitempty" json:"vault,omitempty"`
+	Client       string   `msgpack:"client,omitempty" json:"client,omitempty"`
+	Capabilities []string `msgpack:"capabilities,omitempty" json:"capabilities,omitempty"`
 }
 
 // HelloResponse is the HELLO_OK response payload.
 type HelloResponse struct {
-	ServerVersion string   `msgpack:"server_version"`
-	SessionID     string   `msgpack:"session_id"`
-	VaultID       string   `msgpack:"vault_id"`
-	Capabilities  []string `msgpack:"capabilities"`
-	Limits        Limits   `msgpack:"limits"`
+	ServerVersion string   `msgpack:"server_version" json:"server_version"`
+	SessionID     string   `msgpack:"session_id" json:"session_id"`
+	VaultID       string   `msgpack:"vault_id" json:"vault_id"`
+	Capabilities  []string `msgpack:"capabilities" json:"capabilities"`
+	Limits        Limits   `msgpack:"limits" json:"limits"`
 }
 
 // Limits defines the server's operational constraints.
 type Limits struct {
-	MaxResults   int `msgpack:"max_results"`
-	MaxHopDepth  int `msgpack:"max_hop_depth"`
-	MaxRate      int `msgpack:"max_rate"`
-	MaxPayloadMB int `msgpack:"max_payload_mb"`
+	MaxResults   int `msgpack:"max_results" json:"max_results"`
+	MaxHopDepth  int `msgpack:"max_hop_depth" json:"max_hop_depth"`
+	MaxRate      int `msgpack:"max_rate" json:"max_rate"`
+	MaxPayloadMB int `msgpack:"max_payload_mb" json:"max_payload_mb"`
 }
 
 // InlineEntity is a caller-provided entity for inline enrichment.
@@ -75,24 +75,24 @@ type InlineEntityRelationship struct {
 
 // WriteRequest stores a new engram.
 type WriteRequest struct {
-	Concept      string        `msgpack:"concept"`
-	Content      string        `msgpack:"content"`
-	Tags         []string      `msgpack:"tags,omitempty"`
-	Confidence   float32       `msgpack:"confidence,omitempty"`
-	Stability    float32       `msgpack:"stability,omitempty"`
-	CreatedAt    *time.Time    `msgpack:"created_at,omitempty"`
-	Associations []Association `msgpack:"associations,omitempty"`
-	Embedding    []float32     `msgpack:"embedding,omitempty"`
-	Vault        string        `msgpack:"vault,omitempty"`
-	IdempotentID string        `msgpack:"idempotent_id,omitempty"`
-	MemoryType   uint8         `msgpack:"memory_type,omitempty"`
-	TypeLabel    string        `msgpack:"type_label,omitempty"`
+	Concept      string        `msgpack:"concept" json:"concept"`
+	Content      string        `msgpack:"content" json:"content"`
+	Tags         []string      `msgpack:"tags,omitempty" json:"tags,omitempty"`
+	Confidence   float32       `msgpack:"confidence,omitempty" json:"confidence,omitempty"`
+	Stability    float32       `msgpack:"stability,omitempty" json:"stability,omitempty"`
+	CreatedAt    *time.Time    `msgpack:"created_at,omitempty" json:"created_at,omitempty"`
+	Associations []Association `msgpack:"associations,omitempty" json:"associations,omitempty"`
+	Embedding    []float32     `msgpack:"embedding,omitempty" json:"embedding,omitempty"`
+	Vault        string        `msgpack:"vault,omitempty" json:"vault,omitempty"`
+	IdempotentID string        `msgpack:"idempotent_id,omitempty" json:"idempotent_id,omitempty"`
+	MemoryType   uint8         `msgpack:"memory_type,omitempty" json:"memory_type,omitempty"`
+	TypeLabel    string        `msgpack:"type_label,omitempty" json:"type_label,omitempty"`
 
 	// Inline enrichment: caller-provided data that bypasses background enrichment.
-	Summary              string                     `msgpack:"summary,omitempty"`
-	Entities             []InlineEntity             `msgpack:"entities,omitempty"`
-	Relationships        []InlineRelationship       `msgpack:"relationships,omitempty"`
-	EntityRelationships  []InlineEntityRelationship `msgpack:"entity_relationships,omitempty"`
+	Summary             string                     `msgpack:"summary,omitempty" json:"summary,omitempty"`
+	Entities            []InlineEntity             `msgpack:"entities,omitempty" json:"entities,omitempty"`
+	Relationships       []InlineRelationship       `msgpack:"relationships,omitempty" json:"relationships,omitempty"`
+	EntityRelationships []InlineEntityRelationship `msgpack:"entity_relationships,omitempty" json:"entity_relationships,omitempty"`
 }
 
 // WriteResponse confirms a write and returns the assigned ULID.
@@ -223,20 +223,20 @@ type ScoreComponents struct {
 
 // SubscribeRequest registers a context subscription.
 type SubscribeRequest struct {
-	SubscriptionID string   `msgpack:"subscription_id,omitempty"`
-	Context        []string `msgpack:"context"`
-	Threshold      float32  `msgpack:"threshold,omitempty"`
-	Vault          string   `msgpack:"vault,omitempty"`
-	TTL            int      `msgpack:"ttl,omitempty"`
-	RateLimit      int      `msgpack:"rate_limit,omitempty"`
-	PushOnWrite    bool     `msgpack:"push_on_write,omitempty"`
-	DeltaThreshold float32  `msgpack:"delta_threshold,omitempty"`
+	SubscriptionID string   `msgpack:"subscription_id,omitempty" json:"subscription_id,omitempty"`
+	Context        []string `msgpack:"context" json:"context"`
+	Threshold      float32  `msgpack:"threshold,omitempty" json:"threshold,omitempty"`
+	Vault          string   `msgpack:"vault,omitempty" json:"vault,omitempty"`
+	TTL            int      `msgpack:"ttl,omitempty" json:"ttl,omitempty"`
+	RateLimit      int      `msgpack:"rate_limit,omitempty" json:"rate_limit,omitempty"`
+	PushOnWrite    bool     `msgpack:"push_on_write,omitempty" json:"push_on_write,omitempty"`
+	DeltaThreshold float32  `msgpack:"delta_threshold,omitempty" json:"delta_threshold,omitempty"`
 }
 
 // SubscribeResponse confirms subscription creation.
 type SubscribeResponse struct {
-	SubID  string `msgpack:"sub_id"`
-	Status string `msgpack:"status"`
+	SubID  string `msgpack:"sub_id" json:"sub_id"`
+	Status string `msgpack:"status" json:"status"`
 }
 
 // ActivationPush is an unsolicited server push.
@@ -274,9 +274,9 @@ type LinkResponse struct {
 
 // ForgetRequest soft-deletes an engram.
 type ForgetRequest struct {
-	ID    string `msgpack:"id"`
-	Hard  bool   `msgpack:"hard,omitempty"`
-	Vault string `msgpack:"vault,omitempty"`
+	ID    string `msgpack:"id" json:"id"`
+	Hard  bool   `msgpack:"hard,omitempty" json:"hard,omitempty"`
+	Vault string `msgpack:"vault,omitempty" json:"vault,omitempty"`
 }
 
 // ForgetResponse confirms deletion.
@@ -310,10 +310,10 @@ type StatResponse struct {
 
 // PingRequest is a keepalive probe.
 type PingRequest struct {
-	Data string `msgpack:"data,omitempty"`
+	Data string `msgpack:"data,omitempty" json:"data,omitempty"`
 }
 
 // PongResponse is a keepalive response.
 type PongResponse struct {
-	Data string `msgpack:"data,omitempty"`
+	Data string `msgpack:"data,omitempty" json:"data,omitempty"`
 }
