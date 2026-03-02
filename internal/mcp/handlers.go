@@ -1070,7 +1070,12 @@ func applyEnrichmentArgs(args map[string]any, req *mbp.WriteRequest) {
 				continue
 			}
 			weight := float32(0.9)
-			if w, ok := eMap["weight"].(float64); ok && w > 0 && w <= 1 {
+			if w, ok := eMap["weight"].(float64); ok {
+				if w < 0 {
+					w = 0
+				} else if w > 1 {
+					w = 1
+				}
 				weight = float32(w)
 			}
 			req.EntityRelationships = append(req.EntityRelationships, mbp.InlineEntityRelationship{
