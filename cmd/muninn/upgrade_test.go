@@ -22,3 +22,44 @@ func TestNewerVersionAvailable(t *testing.T) {
 		}
 	}
 }
+
+func TestIsHomebrewInstall(t *testing.T) {
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"/opt/homebrew/Cellar/muninn/1.0.0/bin/muninn", true},
+		{"/usr/local/opt/muninn/bin/muninn", true},
+		{"/opt/homebrew/bin/muninn", true},
+		{"/usr/local/Cellar/muninn/1.0.0/bin/muninn", true},
+		{"/home/user/.local/bin/muninn", false},
+		{"/usr/local/bin/muninn", false},
+		{"/tmp/muninn", false},
+	}
+	for _, tc := range cases {
+		got := isHomebrewInstallPath(tc.path)
+		if got != tc.want {
+			t.Errorf("isHomebrewInstallPath(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestReleaseAssetURL(t *testing.T) {
+	url := releaseAssetURL("v1.2.3", "darwin", "arm64")
+	want := "https://github.com/scrypster/muninndb/releases/download/v1.2.3/muninn_v1.2.3_darwin_arm64.tar.gz"
+	if url != want {
+		t.Errorf("got %q, want %q", url, want)
+	}
+
+	url = releaseAssetURL("v1.2.3", "linux", "amd64")
+	want = "https://github.com/scrypster/muninndb/releases/download/v1.2.3/muninn_v1.2.3_linux_amd64.tar.gz"
+	if url != want {
+		t.Errorf("got %q, want %q", url, want)
+	}
+
+	url = releaseAssetURL("v1.2.3", "windows", "amd64")
+	want = "https://github.com/scrypster/muninndb/releases/download/v1.2.3/muninn_v1.2.3_windows_amd64.zip"
+	if url != want {
+		t.Errorf("got %q, want %q", url, want)
+	}
+}

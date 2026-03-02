@@ -152,3 +152,36 @@ func runUpgrade(args []string) {
 	fmt.Println("  After upgrading: muninn restart")
 	fmt.Println()
 }
+
+// isHomebrewInstallPath returns true if exePath is under a Homebrew prefix.
+func isHomebrewInstallPath(exePath string) bool {
+	homebrewMarkers := []string{"/Cellar/", "/opt/homebrew/", "/usr/local/opt/"}
+	for _, marker := range homebrewMarkers {
+		if strings.Contains(exePath, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// isHomebrewInstall returns true if the running binary lives under a Homebrew prefix.
+func isHomebrewInstall() bool {
+	exe, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	return isHomebrewInstallPath(exe)
+}
+
+// releaseAssetURL returns the GitHub release asset URL for the given version, OS, and arch.
+// Archive format is tar.gz for Linux/macOS and zip for Windows.
+func releaseAssetURL(version, goos, goarch string) string {
+	ext := "tar.gz"
+	if goos == "windows" {
+		ext = "zip"
+	}
+	return fmt.Sprintf(
+		"https://github.com/scrypster/muninndb/releases/download/%s/muninn_%s_%s_%s.%s",
+		version, version, goos, goarch, ext,
+	)
+}
