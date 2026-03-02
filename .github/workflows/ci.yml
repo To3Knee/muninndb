@@ -306,10 +306,12 @@ jobs:
           echo "OpenAPI spec paths : $spec_routes"
           echo "server.go handlers : $server_routes"
 
-          # Warn (not fail) if they diverge by more than 5 — exact parity is
-          # unlikely because server.go includes middleware mounts, health
-          # endpoints, and static-file routes that are intentionally omitted
-          # from the public-facing spec.
+          # Warn (not fail) if they diverge by more than 5.
+          # The expected delta is ~5: server.go registers multiple HTTP methods
+          # on the same path (e.g. GET + PUT on /api/admin/plugin-config),
+          # so HandleFunc count > unique path count. All unique paths are
+          # represented in the spec; the surplus HandleFuncs are extra methods
+          # on already-documented paths.
           diff=$((server_routes - spec_routes))
           abs_diff=${diff#-}
           if [ "$abs_diff" -gt 5 ]; then
