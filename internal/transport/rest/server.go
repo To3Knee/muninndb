@@ -441,12 +441,13 @@ func (s *Server) publicBodySizeMiddleware(next http.HandlerFunc) http.HandlerFun
 
 // withMiddleware applies the full chain: observability + body size limit + vault auth.
 // All vault-scoped data routes use this.
+// Admin session cookies bypass vault locking so the Web UI can access any vault.
 // If authStore is nil (e.g. in tests), vault auth is skipped.
 func (s *Server) withMiddleware(handler http.HandlerFunc) http.HandlerFunc {
 	if s.authStore == nil {
 		return s.withPublicMiddleware(s.bodySizeMiddleware(handler))
 	}
-	return s.withPublicMiddleware(s.bodySizeMiddleware(s.authStore.VaultAuthMiddleware(handler)))
+	return s.withPublicMiddleware(s.bodySizeMiddleware(s.authStore.VaultAuthWithAdminBypass(s.sessionSecret, handler)))
 }
 
 // withAdminMiddleware applies observability + body size limit + admin session auth.
