@@ -121,11 +121,14 @@ func (s *Store) RecordFeedback(ctx context.Context, ws [8]byte, signal FeedbackS
 		return // best effort
 	}
 
-	// Apply feedback update
-	vw.Update(signal)
+	// Copy before mutating. Get returns the cached pointer; concurrent
+	// RecordFeedback calls from parallel Engine.Read goroutines would race
+	// on the same VaultWeights struct without this copy.
+	vwCopy := *vw
+	vwCopy.Update(signal)
 
-	// Persist (async best-effort)
-	if err := s.Save(ctx, vw); err != nil {
+	// Persist and replace cache entry with the updated copy (async best-effort).
+	if err := s.Save(ctx, &vwCopy); err != nil {
 		slog.Warn("failed to persist feedback", "err", err)
 	}
 }
