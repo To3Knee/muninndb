@@ -196,3 +196,122 @@ func TestReplayEnrichment_StagesRunReflectsRequest(t *testing.T) {
 		}
 	}
 }
+
+// TestReplayEnrichment_WritesBackToEngram verifies that ReplayEnrichment actually
+// persists the Summary and KeyPoints returned by the enrich plugin into each engram.
+func TestReplayEnrichment_WritesBackToEngram(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	const vault = "default"
+	ws := eng.store.ResolveVaultPrefix(vault)
+
+	// Write 3 engrams without enrichment.
+	concepts := []string{"alpha concept", "beta concept", "gamma concept"}
+	ids := make([]storage.ULID, 0, len(concepts))
+	for _, concept := range concepts {
+		resp, err := eng.Write(ctx, &mbp.WriteRequest{
+			Vault:   vault,
+			Content: "content for " + concept,
+			Concept: concept,
+		})
+		if err != nil {
+			t.Fatalf("Write(%q): %v", concept, err)
+		}
+		id, err := storage.ParseULID(resp.ID)
+		if err != nil {
+			t.Fatalf("ParseULID(%q): %v", resp.ID, err)
+		}
+		ids = append(ids, id)
+	}
+
+	// Wire a mock that returns a concept-specific summary.
+	mock := &mockEnrichPlugin{
+		enrichFn: func(_ context.Context, e *storage.Engram) (*plugin.EnrichmentResult, error) {
+			return &plugin.EnrichmentResult{
+				Summary:   "mock summary for " + e.Concept,
+				KeyPoints: []string{"kp1", "kp2"},
+			}, nil
+		},
+	}
+	eng.SetEnrichPlugin(mock)
+
+	// Run replay enrichment (nil stages = all stages, dryRun=false).
+	result, err := eng.ReplayEnrichment(ctx, vault, nil, 10, false)
+	if err != nil {
+		t.Fatalf("ReplayEnrichment: %v", err)
+	}
+
+	if result.Processed != 3 {
+		t.Errorf("Processed: got %d, want 3", result.Processed)
+	}
+	if result.Skipped != 0 {
+		t.Errorf("Skipped: got %d, want 0", result.Skipped)
+	}
+	if mock.calls != 3 {
+		t.Errorf("mock.calls: got %d, want 3", mock.calls)
+	}
+
+	// Read each engram back and verify enrichment was persisted.
+	for i, id := range ids {
+		got, err := eng.store.GetEngram(ctx, ws, id)
+		if err != nil {
+			t.Fatalf("GetEngram[%d]: %v", i, err)
+		}
+		want := "mock summary for " + concepts[i]
+		if got.Summary != want {
+			t.Errorf("engram[%d] Summary: got %q, want %q", i, got.Summary, want)
+		}
+		if len(got.KeyPoints) != 2 {
+			t.Errorf("engram[%d] KeyPoints length: got %d, want 2", i, len(got.KeyPoints))
+		}
+	}
+}
+
+// TestRetryEnrich_WritesBackToEngram verifies that a single-engram enrichment
+// via ReplayEnrichment (limit=1) persists the Summary field into the engram.
+func TestRetryEnrich_WritesBackToEngram(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	const vault = "default"
+	ws := eng.store.ResolveVaultPrefix(vault)
+
+	// Write one engram.
+	resp, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault:   vault,
+		Content: "single engram content",
+		Concept: "single concept",
+	})
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	id, err := storage.ParseULID(resp.ID)
+	if err != nil {
+		t.Fatalf("ParseULID: %v", err)
+	}
+
+	// Wire the mock.
+	mock := &mockEnrichPlugin{}
+	eng.SetEnrichPlugin(mock)
+
+	// ReplayEnrichment with limit=1 acts as a single-engram retry-enrich.
+	_, err = eng.ReplayEnrichment(ctx, vault, nil, 1, false)
+	if err != nil {
+		t.Fatalf("ReplayEnrichment: %v", err)
+	}
+
+	// Read the engram back and verify Summary is populated.
+	got, err := eng.store.GetEngram(ctx, ws, id)
+	if err != nil {
+		t.Fatalf("GetEngram: %v", err)
+	}
+	if got.Summary == "" {
+		t.Error("expected Summary to be populated after enrichment, got empty string")
+	}
+	if mock.calls == 0 {
+		t.Error("expected enrich plugin to be called at least once")
+	}
+}
