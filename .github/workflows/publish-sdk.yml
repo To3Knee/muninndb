@@ -77,13 +77,15 @@ jobs:
         if: github.event.inputs.dry_run == 'true'
         run: echo "Dry run complete. Packages built but not uploaded."
 
-  # ── Node SDK → npm (OIDC trusted publishing — no token) ──────────────────
+  # ── Node SDK → npm ────────────────────────────────────────────────────────
+  # Requires: NPM_TOKEN secret (classic automation token from npmjs.com).
+  # To set up: https://docs.npmjs.com/creating-and-viewing-access-tokens
+  # Add to repo secrets as NPM_TOKEN with "Automation" token type.
   publish-node:
     name: Build & publish @muninndb/client to npm
     runs-on: ubuntu-latest
 
     permissions:
-      id-token: write
       contents: read
 
     steps:
@@ -109,6 +111,8 @@ jobs:
         if: github.event.inputs.dry_run != 'true'
         working-directory: sdk/node
         run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Dry run — skip npm publish
         if: github.event.inputs.dry_run == 'true'
