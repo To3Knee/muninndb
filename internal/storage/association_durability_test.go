@@ -35,7 +35,7 @@ func TestAssocMetadata_LastActivated_PreservedOnUpdate(t *testing.T) {
 	}
 
 	// Update only the weight — all other metadata should be preserved.
-	if err := store.UpdateAssocWeight(ctx, ws, src, dst, 0.7); err != nil {
+	if err := store.UpdateAssocWeight(ctx, ws, src, dst, 0.7, 0); err != nil {
 		t.Fatalf("UpdateAssocWeight: %v", err)
 	}
 
@@ -153,12 +153,12 @@ func TestAssocPeakWeight_TrackedAcrossUpdates(t *testing.T) {
 	}
 
 	// Boost to 0.8 — peak becomes 0.8
-	if err := store.UpdateAssocWeight(ctx, ws, src, dst, 0.8); err != nil {
+	if err := store.UpdateAssocWeight(ctx, ws, src, dst, 0.8, 0); err != nil {
 		t.Fatalf("UpdateAssocWeight to 0.8: %v", err)
 	}
 
 	// Drop to 0.3 — peak should remain 0.8
-	if err := store.UpdateAssocWeight(ctx, ws, src, dst, 0.3); err != nil {
+	if err := store.UpdateAssocWeight(ctx, ws, src, dst, 0.3, 0); err != nil {
 		t.Fatalf("UpdateAssocWeight to 0.3: %v", err)
 	}
 

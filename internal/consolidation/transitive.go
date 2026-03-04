@@ -103,7 +103,7 @@ func (w *Worker) runPhase5TransitiveInference(ctx context.Context, store *storag
 				}
 
 				if !w.DryRun {
-					if err := store.UpdateAssocWeight(ctx, wsPrefix, a, c, inferredWeight); err != nil {
+					if err := store.UpdateAssocWeight(ctx, wsPrefix, a, c, inferredWeight, 0); err != nil {
 						slog.Warn("consolidation phase 5: failed to infer association", "a", a, "c", c, "error", err)
 						continue
 					}

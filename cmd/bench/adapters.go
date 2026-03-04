@@ -14,7 +14,7 @@ func (a *benchHebbianAdapter) GetAssocWeight(ctx context.Context, ws [8]byte, sr
 	return a.store.GetAssocWeight(ctx, ws, storage.ULID(src), storage.ULID(dst))
 }
 func (a *benchHebbianAdapter) UpdateAssocWeight(ctx context.Context, ws [8]byte, src, dst [16]byte, w float32) error {
-	return a.store.UpdateAssocWeight(ctx, ws, storage.ULID(src), storage.ULID(dst), w)
+	return a.store.UpdateAssocWeight(ctx, ws, storage.ULID(src), storage.ULID(dst), w, 0)
 }
 func (a *benchHebbianAdapter) DecayAssocWeights(ctx context.Context, ws [8]byte, factor float64, min float32) (int, error) {
 	return a.store.DecayAssocWeights(ctx, ws, factor, min)
