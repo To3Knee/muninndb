@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/google/uuid"
 	"github.com/scrypster/muninndb/internal/auth"
 	"github.com/scrypster/muninndb/internal/brief"
@@ -171,9 +172,8 @@ type Engine struct {
 	// (PruneVault, ReindexFTSVault, ClearVault). Maps string vault name → *sync.Mutex.
 	vaultMu sync.Map
 
-	// childMu serializes the read-modify-write ordinal assignment in AddChild
-	// when Ordinal is nil (append mode). Maps parent ULID string → *sync.Mutex.
-	childMu sync.Map
+	childMuGuard sync.Mutex                      // guards childLRU get-or-create
+	childLRU     *lru.Cache[string, *sync.Mutex] // bounded per-parent-ULID mutexes
 }
 
 // SetOnWrite registers a callback invoked after every successful Write.
@@ -248,8 +248,14 @@ func (e *Engine) getVaultMutex(name string) *sync.Mutex {
 // Used to serialize the read-modify-write ordinal assignment in AddChild (append mode)
 // so concurrent appends to the same parent cannot produce duplicate ordinals.
 func (e *Engine) getChildMutex(parentID string) *sync.Mutex {
-	mu, _ := e.childMu.LoadOrStore(parentID, &sync.Mutex{})
-	return mu.(*sync.Mutex)
+	e.childMuGuard.Lock()
+	mu, ok := e.childLRU.Get(parentID)
+	if !ok {
+		mu = &sync.Mutex{}
+		e.childLRU.Add(parentID, mu)
+	}
+	e.childMuGuard.Unlock()
+	return mu
 }
 
 // noveltyJob is the unit of work for the async novelty worker.
@@ -276,6 +282,7 @@ func NewEngine(
 	hnswRegistry *hnsw.Registry,
 ) *Engine {
 	stopCtx, stopCancel := context.WithCancel(context.Background())
+	childLRU, _ := lru.New[string, *sync.Mutex](50_000)
 	e := &Engine{
 		store:            store,
 		authStore:        authStore,
@@ -301,6 +308,7 @@ func NewEngine(
 		stopCancel:       stopCancel,
 		hnswRegistry:     hnswRegistry,
 		jobManager:       vaultjob.NewManager(),
+		childLRU:         childLRU,
 	}
 	// Start async novelty worker to decouple O(N) Jaccard scan from write hot path.
 	go e.runNoveltyWorker()
