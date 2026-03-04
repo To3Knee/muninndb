@@ -374,6 +374,11 @@ func (ps *PebbleStore) DecayAssocWeights(ctx context.Context, wsPrefix [8]byte, 
 		oldW   float32
 		newW   float32
 		remove bool
+		// Preserved from existing Pebble value:
+		relType       RelType
+		confidence    float32
+		createdAt     time.Time
+		lastActivated int32
 	}
 
 	removed := 0
@@ -385,19 +390,19 @@ func (ps *PebbleStore) DecayAssocWeights(ctx context.Context, wsPrefix [8]byte, 
 		}
 		batch := ps.db.NewBatch()
 		defer batch.Close()
-		newAssocValue := encodeAssocValue(0, 1.0, time.Time{}, 0)
 		for _, e := range chunk {
 			_ = batch.Delete(keys.AssocFwdKey(wsPrefix, e.src, e.oldW, e.dst), nil)
 			_ = batch.Delete(keys.AssocRevKey(wsPrefix, e.dst, e.oldW, e.src), nil)
 			if !e.remove {
-				_ = batch.Set(keys.AssocFwdKey(wsPrefix, e.src, e.newW, e.dst), newAssocValue[:], nil)
-				_ = batch.Set(keys.AssocRevKey(wsPrefix, e.dst, e.newW, e.src), newAssocValue[:], nil)
-				// Add weight index update:
+				// Preserve existing metadata. Do NOT update lastActivated here —
+				// decay is a background process, not a user activation.
+				val := encodeAssocValue(e.relType, e.confidence, e.createdAt, e.lastActivated)
+				_ = batch.Set(keys.AssocFwdKey(wsPrefix, e.src, e.newW, e.dst), val[:], nil)
+				_ = batch.Set(keys.AssocRevKey(wsPrefix, e.dst, e.newW, e.src), val[:], nil)
 				var wiBuf [4]byte
 				binary.BigEndian.PutUint32(wiBuf[:], math.Float32bits(e.newW))
 				_ = batch.Set(keys.AssocWeightIndexKey(wsPrefix, e.src, e.dst), wiBuf[:], nil)
 			} else {
-				// Add weight index deletion:
 				_ = batch.Delete(keys.AssocWeightIndexKey(wsPrefix, e.src, e.dst), nil)
 			}
 		}
@@ -413,6 +418,21 @@ func (ps *PebbleStore) DecayAssocWeights(ctx context.Context, wsPrefix [8]byte, 
 		if len(key) < 45 {
 			continue
 		}
+
+		// Decode existing metadata from the value bytes before extracting key fields.
+		relType, confidence, createdAt, lastActivated := decodeAssocValue(iter.Value())
+
+		// Recency skip: associations activated within the grace window are not decayed.
+		// Window must be > a few seconds (to protect edges just activated) but
+		// < 30 minutes (so edges activated 30 min ago are still eligible for decay).
+		const decayGraceWindow = 5 * time.Minute
+		if lastActivated > 0 {
+			activatedAt := time.Unix(int64(lastActivated), 0)
+			if time.Since(activatedAt) < decayGraceWindow {
+				continue // skip — recently used, leave key untouched
+			}
+		}
+
 		var src, dst [16]byte
 		copy(src[:], key[9:25])
 		var wc [4]byte
@@ -422,7 +442,11 @@ func (ps *PebbleStore) DecayAssocWeights(ctx context.Context, wsPrefix [8]byte, 
 		oldW := keys.WeightFromComplement(wc)
 		newW := float32(float64(oldW) * decayFactor)
 
-		e := assocEntry{src: src, dst: dst, oldW: oldW, newW: newW}
+		e := assocEntry{
+			src: src, dst: dst, oldW: oldW, newW: newW,
+			relType: relType, confidence: confidence,
+			createdAt: createdAt, lastActivated: lastActivated,
+		}
 		if newW < minWeight {
 			e.remove = true
 			removed++
