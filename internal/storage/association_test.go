@@ -421,7 +421,7 @@ func TestUpdateAssocWeightPersistsCorrectly(t *testing.T) {
 	}
 
 	// Update weight.
-	if err := store.UpdateAssocWeight(ctx, ws, src, dst, 0.85); err != nil {
+	if err := store.UpdateAssocWeight(ctx, ws, src, dst, 0.85, 0); err != nil {
 		t.Fatalf("UpdateAssocWeight: %v", err)
 	}
 
