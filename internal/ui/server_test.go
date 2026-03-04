@@ -640,8 +640,8 @@ func TestUIServerBindsToAddr(t *testing.T) {
 	}
 	resp.Body.Close()
 	// Any HTTP response (200, 302, 401) proves the server is listening
-	if resp.StatusCode == 0 {
-		t.Fatalf("expected a valid HTTP status, got 0")
+	if resp.StatusCode < 100 || resp.StatusCode > 599 {
+		t.Fatalf("expected valid HTTP status code, got %d", resp.StatusCode)
 	}
 	t.Logf("server listening on %s, status %d", addr, resp.StatusCode)
 }

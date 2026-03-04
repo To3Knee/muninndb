@@ -144,7 +144,7 @@ func (s *Server) Start(ctx context.Context, addr string) error {
 	if err != nil {
 		return err
 	}
-	s.ln = ln
+	s.ln = ln // store raw listener for Addr(); TLS wrapper (if any) shares the same addr
 	s.server.Addr = ln.Addr().String()
 	if s.tlsConfig != nil {
 		ln = tls.NewListener(ln, s.tlsConfig)
@@ -163,6 +163,7 @@ func (s *Server) Start(ctx context.Context, addr string) error {
 }
 
 // Addr returns the server's resolved listening address after Start has been called.
+// Safe to call from the same goroutine as Start; no concurrent access is expected.
 func (s *Server) Addr() string {
 	if s.ln != nil {
 		return s.ln.Addr().String()
