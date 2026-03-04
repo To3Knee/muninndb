@@ -44,7 +44,7 @@ func TestTransitiveInference_PeakWeightFallback(t *testing.T) {
 		t.Fatalf("WriteAssociation A→B: %v", err)
 	}
 	// Decay A→B to 0.5 — UpdateAssocWeight preserves PeakWeight monotonically (stays 0.8).
-	if err := store.UpdateAssocWeight(ctx, wsPrefix, idA, idB, 0.5); err != nil {
+	if err := store.UpdateAssocWeight(ctx, wsPrefix, idA, idB, 0.5, 0); err != nil {
 		t.Fatalf("UpdateAssocWeight A→B to 0.5: %v", err)
 	}
 
@@ -54,7 +54,7 @@ func TestTransitiveInference_PeakWeightFallback(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("WriteAssociation B→C: %v", err)
 	}
-	if err := store.UpdateAssocWeight(ctx, wsPrefix, idB, idC, 0.5); err != nil {
+	if err := store.UpdateAssocWeight(ctx, wsPrefix, idB, idC, 0.5, 0); err != nil {
 		t.Fatalf("UpdateAssocWeight B→C to 0.5: %v", err)
 	}
 
