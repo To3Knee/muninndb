@@ -205,7 +205,7 @@ func (ps *PebbleStore) GetAssociations(ctx context.Context, wsPrefix [8]byte, id
 			var wc [4]byte
 			copy(wc[:], k[25:29])
 			weight := keys.WeightFromComplement(wc)
-			relType, confidence, createdAt, lastActivated, peakWeight, coActivationCount, _ := decodeAssocValue(iter.Value())
+			relType, confidence, createdAt, lastActivated, peakWeight, coActivationCount, restoredAt := decodeAssocValue(iter.Value())
 			assocs = append(assocs, Association{
 				TargetID:          targetID,
 				Weight:            weight,
@@ -215,6 +215,7 @@ func (ps *PebbleStore) GetAssociations(ctx context.Context, wsPrefix [8]byte, id
 				LastActivated:     lastActivated,
 				PeakWeight:        peakWeight,
 				CoActivationCount: coActivationCount,
+				RestoredAt:        restoredAt,
 			})
 		}
 
@@ -272,7 +273,7 @@ func (ps *PebbleStore) associationsForOne(wsPrefix [8]byte, id ULID, maxPerNode 
 
 		// Decode value bytes: rel_type, confidence, timestamps, peakWeight
 		val := iter.Value()
-		relType, confidence, createdAt, lastActivated, peakWeight, coActivationCount, _ := decodeAssocValue(val)
+		relType, confidence, createdAt, lastActivated, peakWeight, coActivationCount, restoredAt := decodeAssocValue(val)
 
 		assocs = append(assocs, Association{
 			TargetID:          targetID,
@@ -283,6 +284,7 @@ func (ps *PebbleStore) associationsForOne(wsPrefix [8]byte, id ULID, maxPerNode 
 			LastActivated:     lastActivated,
 			PeakWeight:        peakWeight,
 			CoActivationCount: coActivationCount,
+			RestoredAt:        restoredAt,
 		})
 	}
 	// Populate cache — expirable.LRU enforces the TTL automatically.
