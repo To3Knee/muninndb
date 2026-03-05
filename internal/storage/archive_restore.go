@@ -29,8 +29,8 @@ type restoredEdge struct {
 
 // RestoreArchivedEdges scans the 0x25 archive prefix for archived edges from srcID,
 // selects the top maxN by consolidation score, restores them to the live index
-// at peakWeight * 0.25, stamps restoredAt, and removes them from the archive.
-// Returns the restored dst IDs.
+// at peakWeight * 0.25, stamps restoredAt = now on the live write, and removes
+// them from the archive. Returns the restored dst IDs.
 func (ps *PebbleStore) RestoreArchivedEdges(ctx context.Context, ws [8]byte, srcID [16]byte, maxN int) ([][16]byte, error) {
 	if maxN <= 0 || maxN > restoreTopN {
 		maxN = restoreTopN
@@ -108,6 +108,8 @@ func (ps *PebbleStore) RestoreArchivedEdges(ctx context.Context, ws [8]byte, src
 		return nil, nil
 	}
 
+	now := int32(time.Now().Unix())
+
 	batch := ps.db.NewBatch()
 	defer batch.Close()
 
@@ -115,8 +117,9 @@ func (ps *PebbleStore) RestoreArchivedEdges(ctx context.Context, ws [8]byte, src
 	for _, c := range candidates {
 		restoreW := c.restoreWeight
 
-		// Encode the live value using the standard 26-byte live format.
-		liveVal := encodeAssocValue(c.relType, c.confidence, c.createdAt, c.lastActivated, c.peakWeight, c.coActivationCount)
+		// Encode the live value using the 30-byte archive format so that restoredAt is stamped.
+		// decodeAssocValue handles both 26-byte and 30-byte values via a length check.
+		liveVal := encodeArchiveValue(c.relType, c.confidence, c.createdAt, c.lastActivated, c.peakWeight, c.coActivationCount, now)
 
 		// Write to 0x03 (forward key) — weight is embedded in the key.
 		fwdKey := keys.AssocFwdKey(ws, srcID, restoreW, c.dst)
