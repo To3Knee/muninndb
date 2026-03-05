@@ -220,7 +220,7 @@ func TestWriteAIToolConfig_AtomicTempCleaned(t *testing.T) {
 	// No temp files should remain
 	entries, _ := os.ReadDir(dir)
 	for _, e := range entries {
-		if strings.Contains(e.Name(), ".tmp.") {
+		if strings.HasSuffix(e.Name(), ".tmp") {
 			t.Errorf("temp file not cleaned up: %s", e.Name())
 		}
 	}

@@ -288,7 +288,10 @@ func openCodeConfigPath() string {
 			appData = filepath.Join(home, "AppData", "Roaming")
 		}
 		return filepath.Join(appData, "opencode", "opencode.json")
-	default:
+	default: // macOS and Linux — OpenCode uses XDG conventions on both
+		if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+			return filepath.Join(xdg, "opencode", "opencode.json")
+		}
 		home, _ := os.UserHomeDir()
 		return filepath.Join(home, ".config", "opencode", "opencode.json")
 	}
