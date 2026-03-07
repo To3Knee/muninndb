@@ -523,7 +523,32 @@ Available operations:
 	return guide, nil
 }
 
-// GetBatchEngramLinks is a stub for Task 1; full implementation added in Task 2.
 func (w *RESTEngineWrapper) GetBatchEngramLinks(ctx context.Context, req *BatchGetEngramLinksRequest) (*BatchGetEngramLinksResponse, error) {
-	return nil, fmt.Errorf("not implemented")
+	vault := req.Vault
+	if vault == "" {
+		vault = "default"
+	}
+	maxPerNode := req.MaxPerNode
+	if maxPerNode <= 0 {
+		maxPerNode = 50
+	}
+	assocMap, err := w.engine.GetAssociationsBatch(ctx, vault, req.IDs, maxPerNode)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string][]AssociationItem, len(assocMap))
+	for srcID, assocs := range assocMap {
+		items := make([]AssociationItem, len(assocs))
+		for i, a := range assocs {
+			items[i] = AssociationItem{
+				TargetID:          a.TargetID.String(),
+				RelType:           uint16(a.RelType),
+				Weight:            a.Weight,
+				CoActivationCount: a.CoActivationCount,
+				RestoredAt:        int64(a.RestoredAt),
+			}
+		}
+		result[srcID] = items
+	}
+	return &BatchGetEngramLinksResponse{Links: result}, nil
 }
