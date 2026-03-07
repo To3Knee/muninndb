@@ -15,7 +15,7 @@ import (
 
 type replState struct {
 	vault         string // current vault context (empty = no vault selected)
-	mcpURL        string // e.g. "http://localhost:8750"
+	mcpURL        string // e.g. "http://127.0.0.1:8750"
 	cmdCount      int    // total commands run this session (for tip rotation)
 	firstRun      bool   // true if no config file existed at shell start
 	sessionCookie string // for REST API calls requiring admin auth
@@ -63,7 +63,7 @@ func parseReplInput(line string) (string, []string) {
 func runShell() {
 	mcpURL := os.Getenv("MUNINNDB_MCP_URL")
 	if mcpURL == "" {
-		mcpURL = "http://localhost:8750"
+		mcpURL = "http://127.0.0.1:8750"
 	}
 
 	// Detect first run (no config file = user hasn't used 'use <vault>' before)
