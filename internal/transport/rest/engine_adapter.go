@@ -522,3 +522,8 @@ Available operations:
 `, vault, statResp.EngramCount)
 	return guide, nil
 }
+
+// GetBatchEngramLinks is a stub for Task 1; full implementation added in Task 2.
+func (w *RESTEngineWrapper) GetBatchEngramLinks(ctx context.Context, req *BatchGetEngramLinksRequest) (*BatchGetEngramLinksResponse, error) {
+	return nil, fmt.Errorf("not implemented")
+}

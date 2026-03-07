@@ -118,6 +118,10 @@ func (m *MockEngine) GetEngramLinks(ctx context.Context, req *GetEngramLinksRequ
 	return &GetEngramLinksResponse{Links: []AssociationItem{}}, nil
 }
 
+func (m *MockEngine) GetBatchEngramLinks(ctx context.Context, req *BatchGetEngramLinksRequest) (*BatchGetEngramLinksResponse, error) {
+	return &BatchGetEngramLinksResponse{Links: map[string][]AssociationItem{}}, nil
+}
+
 func (m *MockEngine) ListVaults(ctx context.Context) ([]string, error) {
 	return []string{"default"}, nil
 }
@@ -604,6 +608,10 @@ func (e *errorEngine) GetSession(ctx context.Context, req *GetSessionRequest) (*
 }
 func (e *errorEngine) GetEngramLinks(ctx context.Context, req *GetEngramLinksRequest) (*GetEngramLinksResponse, error) {
 	return nil, fmt.Errorf("storage error")
+}
+
+func (e *errorEngine) GetBatchEngramLinks(ctx context.Context, req *BatchGetEngramLinksRequest) (*BatchGetEngramLinksResponse, error) {
+	return nil, fmt.Errorf("engine error")
 }
 
 func TestListEngramsEngineError(t *testing.T) {
