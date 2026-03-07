@@ -2,6 +2,7 @@ package rest
 
 import (
 	"context"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/scrypster/muninndb/internal/auth"
@@ -55,3 +56,11 @@ func newVaultTrackingServer(t *testing.T) (*Server, *vaultTrackingEngine, *auth.
 	return srv, eng, store
 }
 
+// TestCtxVault_NoContext verifies ctxVault falls back to "default" when no vault in context.
+func TestCtxVault_NoContext(t *testing.T) {
+	req := httptest.NewRequest("GET", "/api/engrams", nil)
+	got := ctxVault(req)
+	if got != "default" {
+		t.Errorf("ctxVault no context: want %q, got %q", "default", got)
+	}
+}
