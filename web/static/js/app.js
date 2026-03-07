@@ -422,7 +422,6 @@ document.addEventListener('alpine:init', () => {
 
         // Always load these for settings
         this.loadVaults();
-      }
       } else if (view === 'graph') {
         // Clear graph state on vault change so stale nodes from the previous
         // vault are not shown. User must click Load Graph again for the new vault.
