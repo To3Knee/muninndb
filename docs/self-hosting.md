@@ -55,7 +55,7 @@ docker run -d \
   ghcr.io/scrypster/muninndb:latest
 ```
 
-Open the Web UI: http://localhost:8476
+Open the Web UI: http://127.0.0.1:8476
 
 ### Docker Compose
 
