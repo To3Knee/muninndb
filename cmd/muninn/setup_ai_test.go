@@ -315,7 +315,7 @@ func TestParseToolNumbers(t *testing.T) {
 		{"1 1 2", []int{1, 2}}, // deduplication
 		{"", nil},
 		{"6 7 8", []int{6, 7, 8}}, // valid range is 1-9
-		{"abc", nil},    // non-numeric
+		{"abc", nil},              // non-numeric
 	}
 	for _, tt := range tests {
 		got := parseToolNumbers(tt.input)
