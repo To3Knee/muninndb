@@ -149,3 +149,70 @@ func TestVaultRouting_ListEngrams_ExplicitVault(t *testing.T) {
 		t.Errorf("engine ListEngrams vault: want %q, got %q", "myvault", eng.lastListVault)
 	}
 }
+
+// TestVaultAuth_LockedVaultRejectedAtEndpoint verifies that a locked vault
+// rejects unauthenticated requests with 401 at the endpoint level.
+func TestVaultAuth_LockedVaultRejectedAtEndpoint(t *testing.T) {
+	srv, _, store := newVaultTrackingServer(t)
+	if err := store.SetVaultConfig(auth.VaultConfig{Name: "locked", Public: false}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/engrams?vault=locked", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("locked vault no key: want 401, got %d", w.Code)
+	}
+}
+
+// TestVaultAuth_ValidKeyGrantsAccess verifies that a valid scoped API key
+// passes auth and reaches the engine with the correct vault.
+func TestVaultAuth_ValidKeyGrantsAccess(t *testing.T) {
+	srv, eng, store := newVaultTrackingServer(t)
+	if err := store.SetVaultConfig(auth.VaultConfig{Name: "secured", Public: false}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
+	token, _, err := store.GenerateAPIKey("secured", "agent", "full", nil)
+	if err != nil {
+		t.Fatalf("GenerateAPIKey: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/engrams?vault=secured", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("valid key: want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if eng.lastListVault != "secured" {
+		t.Errorf("engine vault: want %q, got %q", "secured", eng.lastListVault)
+	}
+}
+
+// TestVaultAuth_KeyMismatchRejected verifies that a key scoped to vault-a
+// cannot access vault-b, even through the full endpoint path.
+func TestVaultAuth_KeyMismatchRejected(t *testing.T) {
+	srv, _, store := newVaultTrackingServer(t)
+	if err := store.SetVaultConfig(auth.VaultConfig{Name: "vault-a", Public: false}); err != nil {
+		t.Fatalf("SetVaultConfig vault-a: %v", err)
+	}
+	if err := store.SetVaultConfig(auth.VaultConfig{Name: "vault-b", Public: false}); err != nil {
+		t.Fatalf("SetVaultConfig vault-b: %v", err)
+	}
+	token, _, err := store.GenerateAPIKey("vault-a", "agent", "full", nil)
+	if err != nil {
+		t.Fatalf("GenerateAPIKey: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/engrams?vault=vault-b", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("key mismatch: want 401, got %d", w.Code)
+	}
+}
