@@ -58,15 +58,6 @@ func newVaultTrackingServer(t *testing.T) (*Server, *vaultTrackingEngine, *auth.
 	return srv, eng, store
 }
 
-// TestCtxVault_NoContext verifies ctxVault falls back to "default" when no vault in context.
-func TestCtxVault_NoContext(t *testing.T) {
-	req := httptest.NewRequest("GET", "/api/engrams", nil)
-	got := ctxVault(req)
-	if got != "default" {
-		t.Errorf("ctxVault no context: want %q, got %q", "default", got)
-	}
-}
-
 // TestVaultRouting_Write_DefaultVault verifies that POST /api/engrams with no
 // vault param passes "default" to the engine.
 func TestVaultRouting_Write_DefaultVault(t *testing.T) {
@@ -214,5 +205,45 @@ func TestVaultAuth_KeyMismatchRejected(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("key mismatch: want 401, got %d", w.Code)
+	}
+}
+
+// TestVaultRouting_Read_ExplicitVault verifies that GET /api/engrams/{id}?vault=myvault
+// passes "myvault" to the engine.
+func TestVaultRouting_Read_ExplicitVault(t *testing.T) {
+	srv, eng, store := newVaultTrackingServer(t)
+	if err := store.SetVaultConfig(auth.VaultConfig{Name: "myvault", Public: true}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/engrams/some-id?vault=myvault", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	// MockEngine.Read returns a valid ReadResponse with nil error; 200 is expected.
+	// We care that the vault was correctly forwarded, not the HTTP status.
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if eng.lastReadVault != "myvault" {
+		t.Errorf("engine Read vault: want %q, got %q", "myvault", eng.lastReadVault)
+	}
+}
+
+// TestVaultRouting_Forget_ExplicitVault verifies that DELETE /api/engrams/{id}?vault=myvault
+// passes "myvault" to the engine.
+func TestVaultRouting_Forget_ExplicitVault(t *testing.T) {
+	srv, eng, store := newVaultTrackingServer(t)
+	if err := store.SetVaultConfig(auth.VaultConfig{Name: "myvault", Public: true}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
+
+	req := httptest.NewRequest("DELETE", "/api/engrams/some-id?vault=myvault", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	// MockEngine.Forget returns &ForgetResponse{OK: true} with nil error; check vault was forwarded.
+	if eng.lastForgetVault != "myvault" {
+		t.Errorf("engine Forget vault: want %q, got %q", "myvault", eng.lastForgetVault)
 	}
 }
