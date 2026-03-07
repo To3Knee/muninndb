@@ -2,7 +2,9 @@ package rest
 
 import (
 	"context"
+	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/scrypster/muninndb/internal/auth"
@@ -62,5 +64,46 @@ func TestCtxVault_NoContext(t *testing.T) {
 	got := ctxVault(req)
 	if got != "default" {
 		t.Errorf("ctxVault no context: want %q, got %q", "default", got)
+	}
+}
+
+// TestVaultRouting_Write_DefaultVault verifies that POST /api/engrams with no
+// vault param passes "default" to the engine.
+func TestVaultRouting_Write_DefaultVault(t *testing.T) {
+	srv, eng, _ := newVaultTrackingServer(t)
+
+	body := strings.NewReader(`{"concept":"test","content":"hello"}`)
+	req := httptest.NewRequest("POST", "/api/engrams", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	if eng.lastWriteVault != "default" {
+		t.Errorf("engine Write vault: want %q, got %q", "default", eng.lastWriteVault)
+	}
+}
+
+// TestVaultRouting_Write_ExplicitVault verifies that POST /api/engrams?vault=myvault
+// passes "myvault" to the engine.
+func TestVaultRouting_Write_ExplicitVault(t *testing.T) {
+	srv, eng, store := newVaultTrackingServer(t)
+	if err := store.SetVaultConfig(auth.VaultConfig{Name: "myvault", Public: true}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
+
+	body := strings.NewReader(`{"concept":"test","content":"hello"}`)
+	req := httptest.NewRequest("POST", "/api/engrams?vault=myvault", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	if eng.lastWriteVault != "myvault" {
+		t.Errorf("engine Write vault: want %q, got %q", "myvault", eng.lastWriteVault)
 	}
 }
