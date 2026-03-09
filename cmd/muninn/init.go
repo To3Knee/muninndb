@@ -680,13 +680,11 @@ func configureNamedTools(tools []string, mcpURL, token string) []string {
 				fmt.Fprintf(os.Stderr, "  ✗ Windsurf: %v\n", err)
 			}
 		case "openclaw":
-			if err := configureOpenClaw(mcpURL, token); err != nil {
-				errs = append(errs, fmt.Sprintf("OpenClaw: %v", err))
-				fmt.Fprintf(os.Stderr, "  ✗ OpenClaw: %v\n", err)
-			}
-			// Also install the SKILL.md so OpenClaw knows how to use MuninnDB tools.
+			// OpenClaw has no native MCP support — do not touch openclaw.json.
+			// Install only the SKILL.md so OpenClaw recognizes and loads the skill.
 			if err := configureOpenClawSkill(); err != nil {
-				fmt.Fprintf(os.Stderr, "  warning: OpenClaw skill: %v\n", err)
+				errs = append(errs, fmt.Sprintf("OpenClaw skill: %v", err))
+				fmt.Fprintf(os.Stderr, "  ✗ OpenClaw skill: %v\n", err)
 			}
 		case "codex":
 			if err := configureCodex(mcpURL, token); err != nil {
