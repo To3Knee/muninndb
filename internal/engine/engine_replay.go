@@ -97,6 +97,7 @@ func (e *Engine) ReplayEnrichment(ctx context.Context, vault string, stages []st
 		skipped := 0
 		for _, eng := range engrams {
 			if eng == nil {
+				skipped++
 				continue
 			}
 			// "not found" means no flags set yet — treat as 0.
@@ -126,6 +127,7 @@ func (e *Engine) ReplayEnrichment(ctx context.Context, vault string, stages []st
 
 	for i, eng := range engrams {
 		if eng == nil {
+			skipped++
 			continue
 		}
 

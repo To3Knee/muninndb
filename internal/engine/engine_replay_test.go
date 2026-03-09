@@ -424,8 +424,14 @@ func TestReplayEnrichment_ContextCancellation(t *testing.T) {
 	if result.Processed != 2 {
 		t.Errorf("Processed: got %d, want 2", result.Processed)
 	}
-	if result.Remaining <= 0 {
-		t.Errorf("Remaining: got %d, want > 0", result.Remaining)
+	if result.Skipped != 0 {
+		t.Errorf("Skipped: got %d, want 0", result.Skipped)
+	}
+	if result.Failed != 0 {
+		t.Errorf("Failed: got %d, want 0", result.Failed)
+	}
+	if result.Remaining != 3 {
+		t.Errorf("Remaining: got %d, want 3", result.Remaining)
 	}
 	assertResultInvariant(t, result, 5)
 }
