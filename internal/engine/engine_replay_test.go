@@ -94,6 +94,7 @@ func TestReplayEnrichment_DryRunNoModification(t *testing.T) {
 	if result.Skipped != 0 {
 		t.Errorf("expected Skipped=0 for fresh vault (no prior enrichment), got %d", result.Skipped)
 	}
+	assertResultInvariant(t, result, 2)
 	// Verify no enrichment actually ran (no enrichPlugin was set).
 	// Checking the dry_run field is sufficient: engine would error on real run without plugin.
 }
@@ -190,6 +191,7 @@ func TestReplayEnrichment_DryRunEmptyVault(t *testing.T) {
 		t.Errorf("expected 0/0 for empty vault, got processed=%d skipped=%d",
 			result.Processed, result.Skipped)
 	}
+	assertResultInvariant(t, result, 0)
 }
 
 // TestReplayEnrichment_InvalidStageName verifies that unknown stage names

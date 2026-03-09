@@ -82,6 +82,8 @@ func (e *Engine) ReplayEnrichment(ctx context.Context, vault string, stages []st
 		return &ReplayEnrichmentResult{
 			Processed: 0,
 			Skipped:   0,
+			Failed:    0,
+			Remaining: 0,
 			StagesRun: validStages,
 			DryRun:    dryRun,
 		}, nil
@@ -113,6 +115,8 @@ func (e *Engine) ReplayEnrichment(ctx context.Context, vault string, stages []st
 		return &ReplayEnrichmentResult{
 			Processed: needed,
 			Skipped:   skipped,
+			Failed:    0,
+			Remaining: 0,
 			StagesRun: validStages,
 			DryRun:    true,
 		}, nil
