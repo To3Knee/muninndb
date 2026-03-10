@@ -1246,3 +1246,34 @@ func TestClusterCoordinator_HandleHandoff_PromotesTarget(t *testing.T) {
 		t.Fatal("timeout waiting for HANDOFF_ACK")
 	}
 }
+
+// TestBug176_PersistedRoleClearedAfterPromotion is a regression test for GitHub issue #176.
+// When a node was promoted to Cortex via HandleHandoff, PersistRole("cortex") was written to
+// Pebble as a crash-recovery breadcrumb but was never cleared after handlePromotion completed.
+// On the next clean restart, runAsCortex incorrectly entered the crash-recovery path, bypassing
+// the YAML-configured role. This test proves the bug exists (fails before fix) and guards against
+// regressions.
+func TestBug176_PersistedRoleClearedAfterPromotion(t *testing.T) {
+	coord, _ := newTestCoordinator(t, "primary")
+
+	// Simulate the state left by a previous successful HandleHandoff:
+	// PersistRole("cortex") is written before handlePromotion, epoch > 0.
+	if err := coord.epochStore.PersistRole("cortex"); err != nil {
+		t.Fatalf("PersistRole: %v", err)
+	}
+	coord.epochStore.ForceSet(1)
+
+	// Simulate successful promotion (as HandleHandoff would do).
+	simulatePromotion(coord, 1)
+
+	// After a successful promotion, the crash-recovery breadcrumb must be cleared.
+	// Without the fix, LoadRole() still returns "cortex" and the next clean restart
+	// incorrectly enters the crash-recovery path (#176 bug).
+	role, err := coord.epochStore.LoadRole()
+	if err != nil {
+		t.Fatalf("LoadRole: %v", err)
+	}
+	if role != "" {
+		t.Errorf("LoadRole() = %q after successful promotion, want \"\" (regression: issue #176)", role)
+	}
+}

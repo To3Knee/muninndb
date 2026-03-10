@@ -296,8 +296,11 @@ func (c *ClusterCoordinator) Run(ctx context.Context) error {
 	mspCtx, mspCancel := context.WithCancel(ctx)
 	defer mspCancel()
 
-	// missedThreshold=3: SDOWN after 3 missed heartbeat intervals.
-	const mspMissedThreshold = 3
+	// mspMissedThreshold: SDOWN after N missed heartbeat intervals (from config, default 3).
+	mspMissedThreshold := c.cfg.SDOWNBeats
+	if mspMissedThreshold <= 0 {
+		mspMissedThreshold = 3
+	}
 	go func() {
 		if err := c.msp.Run(mspCtx, heartbeat, mspMissedThreshold); err != nil && !errors.Is(err, context.Canceled) {
 			slog.Error("cluster: MSP exited with error", "err", err)
@@ -752,6 +755,14 @@ func (c *ClusterCoordinator) handlePromotion(epoch uint64) {
 	c.election.mu.Unlock()
 
 	slog.Info("cluster: promoted to Cortex", "epoch", epoch, "node", c.cfg.NodeID)
+
+	// Clear the crash-recovery breadcrumb now that in-memory promotion is complete.
+	// PersistRole("cortex") was written before broadcasting CortexClaim to ensure
+	// crash-recovery on restart. Now that handlePromotion has succeeded, clear it so
+	// a subsequent clean restart does not re-enter the crash-recovery path. (#176)
+	if err := c.epochStore.PersistRole(""); err != nil {
+		slog.Warn("cluster: failed to clear persisted role after promotion", "err", err)
+	}
 
 	if c.OnBecameCortex != nil {
 		c.OnBecameCortex(epoch)

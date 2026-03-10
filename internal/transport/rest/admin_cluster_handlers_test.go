@@ -101,6 +101,54 @@ func TestClusterDefaults_NonZero(t *testing.T) {
 	}
 }
 
+// TestBug175_SettingsPersistAllFields is a regression test for GitHub issue #175.
+// The settings endpoint accepted sdown_beats, ccs_interval_seconds, and reconcile_on_heal
+// but applyAndPersistSettings only wrote heartbeat_ms to disk — the other three were silently
+// dropped. This test proves the bug exists (fails before fix) and guards against regressions.
+func TestBug175_SettingsPersistAllFields(t *testing.T) {
+	dataDir := t.TempDir()
+	s := NewServer("localhost:0", &MockEngine{}, nil, nil, nil, EmbedInfo{}, EnrichInfo{}, nil, dataDir, nil)
+
+	// First enable cluster so there is a cluster.yaml on disk.
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/api/admin/cluster/enable",
+		strings.NewReader(`{"role":"primary","bind_addr":"127.0.0.1:8474"}`))
+	r.Header.Set("Content-Type", "application/json")
+	s.mux.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("enable cluster: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Send all four settings fields.
+	w = httptest.NewRecorder()
+	r = httptest.NewRequest("PUT", "/api/admin/cluster/settings",
+		strings.NewReader(`{"heartbeat_ms":750,"sdown_beats":5,"ccs_interval_seconds":60,"reconcile_on_heal":false}`))
+	r.Header.Set("Content-Type", "application/json")
+	s.mux.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("save settings: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Read back the saved config and verify all four fields are persisted.
+	saved, err := config.LoadClusterConfig(dataDir)
+	if err != nil {
+		t.Fatalf("LoadClusterConfig: %v", err)
+	}
+	if saved.HeartbeatMS != 750 {
+		t.Errorf("HeartbeatMS = %d, want 750", saved.HeartbeatMS)
+	}
+	// These three assertions fail before the fix (#175):
+	if saved.SDOWNBeats != 5 {
+		t.Errorf("SDOWNBeats = %d, want 5 (regression: issue #175)", saved.SDOWNBeats)
+	}
+	if saved.CCSIntervalS != 60 {
+		t.Errorf("CCSIntervalS = %d, want 60 (regression: issue #175)", saved.CCSIntervalS)
+	}
+	if saved.ReconcileHeal != false {
+		t.Errorf("ReconcileHeal = %v, want false (regression: issue #175)", saved.ReconcileHeal)
+	}
+}
+
 func TestAdminCluster_Disable_NoCoordinator(t *testing.T) {
 	s := newTestServer(t, nil)
 	w := httptest.NewRecorder()
