@@ -221,12 +221,18 @@ func runUpgrade(args []string) {
 			if pid, err := readPID(pidPath); err == nil {
 				if proc, err := os.FindProcess(pid); err == nil {
 					_ = stopProcess(proc)
-					for i := 0; i < 30; i++ {
+					deadline := time.Now().Add(15 * time.Second)
+					for time.Now().Before(deadline) {
 						if !isProcessRunning(pid) {
 							break
 						}
 						time.Sleep(100 * time.Millisecond)
 					}
+					if isProcessRunning(pid) {
+						_ = proc.Kill()
+						time.Sleep(500 * time.Millisecond)
+					}
+					time.Sleep(200 * time.Millisecond)
 				}
 			}
 			os.Remove(pidPath)
@@ -479,14 +485,22 @@ func selfUpdate(latest string) error {
 		if err := stopProcess(proc); err != nil {
 			return fmt.Errorf("stop daemon: %w", err)
 		}
-		// Wait up to 3s for process to exit
-		deadline := time.Now().Add(3 * time.Second)
+		// Wait up to 15s for graceful exit (PebbleDB flush + WAL sync can take several seconds).
+		deadline := time.Now().Add(15 * time.Second)
 		for time.Now().Before(deadline) {
 			if !isProcessRunning(pid) {
 				break
 			}
 			time.Sleep(100 * time.Millisecond)
 		}
+		// If still alive after graceful period, force-kill to unblock the upgrade.
+		if isProcessRunning(pid) {
+			_ = proc.Kill()
+			time.Sleep(500 * time.Millisecond)
+		}
+		// Brief grace period for the OS to release file locks (e.g. PebbleDB LOCK file)
+		// before the new binary attempts to open the same data directory.
+		time.Sleep(200 * time.Millisecond)
 		os.Remove(pidPath)
 		return nil
 	}); err != nil {
