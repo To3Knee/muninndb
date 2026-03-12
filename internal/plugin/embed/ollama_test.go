@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/scrypster/muninndb/internal/plugin"
 )
 
 func TestOllamaProvider_Init_Success(t *testing.T) {
@@ -360,5 +362,4 @@ func TestOllamaProvider_EmbedBatch_NonEmptyResult(t *testing.T) {
 }
 
 // compile-time assertion — OllamaProvider implements HardwareAwarePlugin after Task 2
-// (commented out until Task 2 is done; uncomment as part of Task 2 verification)
-// var _ plugin.HardwareAwarePlugin = (*OllamaProvider)(nil)
+var _ plugin.HardwareAwarePlugin = (*OllamaProvider)(nil)

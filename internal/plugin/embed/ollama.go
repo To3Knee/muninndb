@@ -280,6 +280,9 @@ func (p *OllamaProvider) embedBatchNew(ctx context.Context, texts []string) ([]f
 		return nil, fmt.Errorf("ollama decode: %w", err)
 	}
 
+	if len(batchResp.Embeddings) == 0 {
+		return nil, fmt.Errorf("ollama embed: server returned empty embeddings")
+	}
 	// Convert float64 → float32 (Ollama returns float64)
 	result := make([]float32, 0, len(texts)*len(batchResp.Embeddings[0]))
 	for _, embedding := range batchResp.Embeddings {
