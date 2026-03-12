@@ -911,15 +911,14 @@ func TestVaultRouting_GetGuide_ExplicitVault(t *testing.T) {
 }
 
 // TestVaultRouting_ResolveContradiction_ExplicitVault verifies that
-// POST /api/admin/contradictions/resolve passes the vault from the request body to the engine.
-// Note: this is an admin endpoint; vault is not set via ?vault= query param but via the body's
-// "vault" field, since withAdminMiddleware does not run VaultAuthMiddleware.
+// POST /api/admin/contradictions/resolve passes the vault from the ?vault= query param to the engine.
+// withAdminMiddleware does not run VaultAuthWithAdminBypass, so vault is read directly from the URL.
 func TestVaultRouting_ResolveContradiction_ExplicitVault(t *testing.T) {
 	srv, eng, _ := newVaultTrackingServer(t)
 
 	// sessionSecret is "" in the test server, so admin auth is skipped.
-	body := strings.NewReader(`{"vault":"myvault","id_a":"a1","id_b":"b1"}`)
-	req := httptest.NewRequest("POST", "/api/admin/contradictions/resolve", body)
+	body := strings.NewReader(`{"id_a":"a1","id_b":"b1"}`)
+	req := httptest.NewRequest("POST", "/api/admin/contradictions/resolve?vault=myvault", body)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.mux.ServeHTTP(w, req)

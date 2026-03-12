@@ -1522,9 +1522,9 @@ func (s *Server) handleResolveContradiction(w http.ResponseWriter, r *http.Reque
 		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "id_a and id_b are required")
 		return
 	}
-	vault := req.Vault
+	vault := r.URL.Query().Get("vault")
 	if vault == "" {
-		vault = ctxVault(r)
+		vault = "default"
 	}
 	if err := s.engine.ResolveContradiction(r.Context(), vault, req.IDA, req.IDB); err != nil {
 		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())

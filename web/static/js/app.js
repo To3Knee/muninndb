@@ -807,9 +807,9 @@ document.addEventListener('alpine:init', () => {
             method: 'PUT',
             body: JSON.stringify({ vault, state: 'archived' }),
           });
-          await this.apiCall('/api/admin/contradictions/resolve', {
+          await this.apiCall('/api/admin/contradictions/resolve?vault=' + encodeURIComponent(vault), {
             method: 'POST',
-            body: JSON.stringify({ vault, id_a: idA, id_b: idB }),
+            body: JSON.stringify({ id_a: idA, id_b: idB }),
           });
         } else if (action === 'keep_b') {
           // B supersedes A; archive A
@@ -821,14 +821,14 @@ document.addEventListener('alpine:init', () => {
             method: 'PUT',
             body: JSON.stringify({ vault, state: 'archived' }),
           });
-          await this.apiCall('/api/admin/contradictions/resolve', {
+          await this.apiCall('/api/admin/contradictions/resolve?vault=' + encodeURIComponent(vault), {
             method: 'POST',
-            body: JSON.stringify({ vault, id_a: idA, id_b: idB }),
+            body: JSON.stringify({ id_a: idA, id_b: idB }),
           });
         } else if (action === 'dismiss') {
-          await this.apiCall('/api/admin/contradictions/resolve', {
+          await this.apiCall('/api/admin/contradictions/resolve?vault=' + encodeURIComponent(vault), {
             method: 'POST',
-            body: JSON.stringify({ vault, id_a: idA, id_b: idB }),
+            body: JSON.stringify({ id_a: idA, id_b: idB }),
           });
         } else if (action === 'merge') {
           // Open consolidate modal pre-filled with both IDs
